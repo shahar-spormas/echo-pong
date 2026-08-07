@@ -1,0 +1,18 @@
+# Make sure to exclude sensitive information and irrelevant files in the docker
+secrets/
+.env
+.env.*
+
+.git/
+.gitignore
+.github/
+k8s/
+
+Dockerfile
+.dockerignore
+*.md
+
+.vscode/
+.idea/
+.DS_Store
+
