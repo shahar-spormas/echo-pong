@@ -1,4 +1,4 @@
-# 🏓 DevOps Home Assignment: Ping-Pong Game Deployment
+# 🏓 DevOps: Ping-Pong Game Deployment
 
 ## 📋 Overview
 
@@ -72,7 +72,7 @@ Take this application to production with support for both **x86** and **ARM64** 
 - Docker
 - Minikube or Kind
 - kubectl
-- Go 1.24
+- Go 1.24 (there are CVEs that are not fixed in that version, will consider them as accepted)
 - GitHub account
 
 ---
