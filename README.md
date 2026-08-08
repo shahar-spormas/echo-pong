@@ -71,6 +71,7 @@ Take this application to production with support for both **x86** and **ARM64** 
 **Prerequisites:**
 - Docker
 - Minikube or Kind
+- Kubernetes 1.30 or newer — the Deployment uses `lifecycle.preStop.sleep`, which older kubelets ignore silently. See `docs/deployment-design.md`.
 - kubectl
 - Go 1.24 (there are CVEs that are not fixed in that version, will consider them as accepted)
 - GitHub account

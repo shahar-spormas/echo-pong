@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ping-pong
+  labels:
+    app.kubernetes.io/name: ping-pong
+spec:
+  # Caps voluntary disruptions (kubectl drain, cluster autoscaler) at one pod.
+  # The Deployment's maxUnavailable: 0 covers rollouts only, not evictions.
+  # maxUnavailable over minAvailable: 2 so it holds at any replica count.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ping-pong
