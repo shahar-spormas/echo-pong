@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ping-pong
+  labels:
+    app.kubernetes.io/name: ping-pong
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Force create-then-delete ordering.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ping-pong
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ping-pong
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 #Optional
+        runAsGroup: 65532 #Optional fsGroup should be enough
+        fsGroup: 65532 # coupled becuase of the secret
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        # Soft not DoNotSchedule: on a single-node Kind cluster a hard constraint
+        # would leave two of the three replicas permanently Pending.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway # thats why we ues this
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ping-pong
+      containers:
+        - name: ping-pong
+          image: ghcr.io/shahar-spormas/echo-pong:v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: SECRET_FILE_PATH
+              value: /etc/ping-pong/secret
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Holds the pod open while endpoint removal propagates, since the
+              # app dies instantly on SIGTERM. Native sleep, not exec: distroless
+              # has no shell. Needs Kubernetes >= 1.30.
+              sleep:
+                seconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: secret
+              mountPath: /etc/ping-pong
+              readOnly: true
+      volumes:
+        - name: secret
+          secret:
+            secretName: ping-pong-secret
+            defaultMode: 0440
+            items:
+              - key: token
+                path: secret
