@@ -40,4 +40,8 @@ secrets/
 # Environment files
 .env
 .env.local
-.env.*.local 
+.env.*.local
+
+# Pinned tools and build outputs produced by .ci/ci_jobs.sh
+.ci/bin/
+.ci-artifacts/

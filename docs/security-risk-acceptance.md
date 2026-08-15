@@ -8,6 +8,7 @@
 | **Component** | `ping-pong-game` container image |
 | **Affected** | Go standard library linked into the application binary |
 | **Base image** | `gcr.io/distroless/static-debian12:nonroot` — contributes **zero** vulnerabilities |
+| **Enforced by** | `.trivyignore.yaml`, checked by `./.ci/ci_jobs.sh do_scan_image` on every build |
 
 ## Decision
 
@@ -22,13 +23,22 @@ the acceptance stops being valid.
 
 ## Finding
 
-Container scan of the built image:
+Trivy is the scanner the pipeline gates on, so it is the count that matters.
+Against the image this repository builds today:
 
 ```
-$ docker scout cves ping-pong:dev --only-severity critical,high
-✗ Detected 1 vulnerable package with 10 vulnerabilities
-  0C   10H   0M   0L   stdlib 1.24.13
+$ ./.ci/ci_jobs.sh do_scan_image
+  19 HIGH, 0 CRITICAL, all in stdlib v1.24.13
+  0 findings in OS packages
 ```
+
+The zero on the second line is the distroless base earning its place: there are
+no OS packages to be vulnerable. Every finding is in the Go standard library
+compiled into the binary.
+
+An earlier pass with Docker Scout reported 10 HIGH against the same package.
+Scanners differ in which advisories they map to a Go release, which is a reason
+to gate on one of them by name rather than on "a scan passed".
 
 Cross-checked against OSV, which counts vulnerabilities at all severities:
 
@@ -49,9 +59,17 @@ All findings are in the standard library. No third-party module is implicated �
 
 ## Reachability analysis
 
-Presence in the binary is not the same as exploitability. `govulncheck` in
-source mode performs call-graph analysis and narrows 22 advisories down to **9**
-with a path from application code:
+Presence in the binary is not the same as exploitability. Of the 19 Trivy
+reports, three are on the request path: `net/url` parsing (CVE-2026-25679,
+CVE-2026-56860) and `mime` header parsing (CVE-2026-42504). The rest are
+`crypto/tls`, `crypto/x509`, `net/mail`, `encoding/asn1`, `encoding/xml`,
+`html/template` and the resolver — linked in by `net/http` and never called by
+a server that speaks plain HTTP, renders no templates and makes no outbound
+requests. Per-advisory reasoning is in `.trivyignore.yaml`, one line each.
+
+`govulncheck` in source mode agrees, on the advisory set it knew at the time.
+Its call-graph analysis narrowed 22 advisories down to **9** with a path from
+application code:
 
 ```
 $ govulncheck ./...
@@ -81,6 +99,28 @@ The seven "not exercised" entries appear because govulncheck's call graph is a
 safe over-approximation — `net/http` links `crypto/tls` and `crypto/x509`
 regardless of whether TLS is configured.
 
+Three advisories in that table (CVE-2026-42507, CVE-2026-42505, CVE-2026-27139)
+are not among Trivy's 19. The lists were produced by different tools at
+different times, and neither is a superset of the other. Only the Trivy set has
+an entry in `.trivyignore.yaml`, because only that set can block a build.
+
+## How the pipeline enforces this
+
+`do_scan_image` scans the image archive that was just built, before anything is
+pushed, and fails on any HIGH or CRITICAL finding that is not listed in
+`.trivyignore.yaml`. Listed findings are printed as an annotation on the run
+rather than hidden, so the accepted set is visible on every build.
+
+Two things this deliberately does not do. It does not use `--ignore-unfixed`,
+which would exempt every unfixed vulnerability including ones nobody has looked
+at — the unfixable findings here are enumerated by hand instead. And it does not
+use `continue-on-error`, so the gate cannot pass while failing.
+
+Each entry carries `expired_at: 2026-09-07`. On that date they stop suppressing
+anything and the build fails until someone decides again. That is the mechanism
+behind the "time-limited" in the status line above; without it, an accepted risk
+quietly becomes a permanent one.
+
 ## Compensating controls
 
 - The pod is not directly internet-facing; traffic arrives through an ingress
@@ -96,8 +136,14 @@ regardless of whether TLS is configured.
 ## Reproducing this analysis
 
 ```bash
-# Container scan
-docker scout cves ping-pong:dev --only-severity critical,high
+# The scan the pipeline gates on, against a freshly built image.
+./.ci/ci_jobs.sh do_build_image
+./.ci/ci_jobs.sh do_scan_image
+
+# The same findings without the accepted-risk file, which is what a new
+# advisory in this package would look like.
+trivy image --input .ci-artifacts/image-$(uname -m | sed s/x86_64/amd64/ \
+  | sed s/aarch64/arm64/).tar --severity HIGH,CRITICAL
 
 # Full advisory list including non-high severities
 curl -s -X POST https://api.osv.dev/v1/query \
@@ -116,5 +162,9 @@ Go statically links the standard library into the binary. Unlike a distribution
 package, a stdlib vulnerability cannot be patched by updating a base layer — the
 only remedy is recompiling with a fixed toolchain. An image sitting untouched in
 the registry therefore accumulates vulnerabilities while its source never
-changes. The pipeline needs a scheduled rebuild on a timer, not only builds
-triggered by commits.
+changes.
+
+The pipeline still has no scheduled rebuild, so an image is only ever scanned
+against the advisory database as it stood on the day of the commit. A `schedule`
+trigger running the same build and scan would catch a new advisory against an
+unchanged source tree. That is the main gap left here.

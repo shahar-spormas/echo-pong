@@ -24,13 +24,10 @@ MIN_DRAIN_SECONDS="${MIN_DRAIN_SECONDS:-8}"
 # lifecycle.preStop.sleep: beta and on by default in 1.30, GA in 1.32.
 MIN_KUBELET_MINOR="${MIN_KUBELET_MINOR:-30}"
 
-PASS=0
-FAIL=0
-SKIP=0
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-pass() { echo "  PASS  $*"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
-skip() { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
+# shellcheck source=scripts/lib/checks.sh
+. "$ROOT_DIR/scripts/lib/checks.sh"
 
 cleanup() {
   kubectl -n "$NAMESPACE" delete pod "$PROBE_POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -65,8 +62,9 @@ if [[ -n "$OLD_NODES" ]]; then
   exit 1
 fi
 
-echo
-echo "1. Did the API server keep the preStop field?"
+check_title "Zero-downtime :: rollout availability and connection draining"
+
+check_section "1. Did the API server keep the preStop field?"
 # An unsupported field can be dropped rather than rejected, so a successful
 # apply proves nothing on its own. Reading it back does.
 PRESTOP="$(kubectl -n "$NAMESPACE" get deploy "$DEPLOYMENT" \
@@ -79,8 +77,7 @@ else
   pass "preStop retained: $PRESTOP"
 fi
 
-echo
-echo "2. Does termination actually wait?"
+check_section "2. Does termination actually wait?"
 POD="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" \
   --field-selector status.phase=Running \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -100,8 +97,7 @@ else
   kubectl -n "$NAMESPACE" rollout status "deploy/$DEPLOYMENT" --timeout=120s >/dev/null
 fi
 
-echo
-echo "3. Did the kubelet complain?"
+check_section "3. Did the kubelet complain?"
 EVENTS="$(kubectl -n "$NAMESPACE" get events \
   --field-selector reason=FailedPreStopHook \
   --no-headers 2>/dev/null || true)"
@@ -109,11 +105,10 @@ if [[ -z "$EVENTS" ]]; then
   pass "no FailedPreStopHook events"
 else
   fail "FailedPreStopHook events present:"
-  echo "$EVENTS" | sed 's/^/        /'
+  echo "$EVENTS" | while IFS= read -r line; do info "$line"; done
 fi
 
-echo
-echo "4. Does traffic survive a rollout?"
+check_section "4. Does traffic survive a rollout?"
 if ! kubectl -n "$INGRESS_NS" get svc "$INGRESS_SVC" >/dev/null 2>&1; then
   # A port-forward is not a substitute. It connects straight to one pod and
   # never consults EndpointSlices or kube-proxy, so it cannot exercise the
@@ -142,8 +137,8 @@ else
   TOTAL="$(echo "$RESULTS" | grep -c . || true)"
   BAD="$(echo "$RESULTS" | grep -vc '^200$' || true)"
 
-  echo "        $TOTAL requests during the rollout"
-  echo "$RESULTS" | sort | uniq -c | sed 's/^/        /'
+  info "$TOTAL requests during the rollout"
+  echo "$RESULTS" | sort | uniq -c | while IFS= read -r line; do info "$line"; done
 
   if [[ "$TOTAL" -eq 0 ]]; then
     fail "probe recorded no requests"
@@ -154,6 +149,4 @@ else
   fi
 fi
 
-echo
-echo "passed $PASS, failed $FAIL, skipped $SKIP"
-[[ "$FAIL" -eq 0 ]]
+check_summary

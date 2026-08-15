@@ -59,8 +59,8 @@ Take this application to production with support for both **x86** and **ARM64** 
 - [ ] Cluster can pull from registry
 
 ### 🏗️ CI/CD
-- [ ] Multi-architecture builds (x86/ARM64)
-- [ ] Images stored in GitHub Container Registry
+- [x] Multi-architecture builds (x86/ARM64)
+- [x] Images stored in GitHub Container Registry
 - [ ] Versioned releases with tags
 - [ ] Both container and binary releases
 
@@ -103,6 +103,50 @@ To run the container without Kubernetes, `./scripts/build.sh && ./scripts/run.sh
 
 ---
 
+## 🔁 CI
+
+`.github/workflows/ci.yml` decides when things run; every step is a function in
+`.ci/ci_jobs.sh`, so the pipeline can be run and linted without pushing:
+
+```bash
+./.ci/ci_jobs.sh              # list the jobs
+./.ci/ci_jobs.sh do_scan_image
+```
+
+Each architecture builds once, on a runner of that architecture, and the scan
+and the Kubernetes suite both work from that one tarball:
+
+```text
+static-checks
+     |
+   build (amd64, arm64)  ->  image tarball
+     |            |
+   scan          e2e          in parallel, both from that tarball
+     |            |
+      `-> publish <-'         only on a push to main
+             |
+      verify-published
+```
+
+A pull request stops after `scan` and `e2e` and never holds registry
+credentials.
+
+A few things worth knowing:
+
+- **Versions.** Each build is `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char
+  commit>`, from the `VERSION` file plus the commit. No `latest`. Release tags
+  are issue #8.
+- **Tools.** kind, kubectl, Trivy and actionlint are pinned in `.ci/consts.sh`
+  rather than taken from whatever the runner image ships. kind and kubectl are
+  checksum-verified too, since they decide the Kubernetes version under test.
+- **Scanning.** HIGH and CRITICAL findings fail the build unless they are listed
+  in `.trivyignore.yaml`, where every entry expires on 2026-09-07. See
+  `docs/security-risk-acceptance.md`.
+- **What gets published.** The image the publish job pushes is the tarball the
+  tests ran against, not a rebuild.
+
+---
+
 ## 📐 Design notes
 
 Each document states a decision, the evidence for it, and what it does not cover.
@@ -110,8 +154,8 @@ Each document states a decision, the evidence for it, and what it does not cover
 - `docs/deployment-design.md` — zero-downtime rollouts: probes, the `preStop` hook, and the disruption budget
 - `docs/exposure-design.md` — Service, Ingress, the NetworkPolicy, and why the ingress controller is a retired project
 - `docs/runtime-config.md` — ConfigMap and Secret wiring, and the couplings that span files
-- `docs/image-and-registry.md` — multi-arch build, the registry pull, and architecture preference
-- `docs/security-risk-acceptance.md` — the Go 1.24 standard library CVEs, and why they are accepted
+- `docs/image-and-registry.md` — multi-arch build, the registry pull, architecture preference, and how CI publishes
+- `docs/security-risk-acceptance.md` — the Go 1.24 standard library CVEs, why they are accepted, and how the scan gate enforces that
 
 ---
 

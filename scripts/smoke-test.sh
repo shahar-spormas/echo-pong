@@ -2,7 +2,7 @@
 # End-to-end proof for issues #4, #5, #6 and #12: build state to serving
 # traffic, asserted rather than eyeballed.
 #
-# The same script runs on a laptop and in .github/workflows/k8s-e2e.yml. Nothing
+# The same script runs on a laptop and in .github/workflows/ci.yml. Nothing
 # is verified in CI that you cannot run here, and nothing here goes unverified
 # in CI, which is the only way a "repeatable local test path" stays true.
 
@@ -32,17 +32,20 @@ PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
 ASSERT_REGISTRY_PULL="${ASSERT_REGISTRY_PULL:-0}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/}"
 
-PASS=0
-FAIL=0
-SKIP=0
+# The image to test instead of the one in k8s/deployment.yaml, whose tag is a
+# published release a failed side-load would silently pass against.
+IMAGE_OVERRIDE="${IMAGE_OVERRIDE:-}"
 
-pass() { echo "  PASS  $*"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
-skip() { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
-info() { echo "        $*"; }
+# shellcheck source=scripts/lib/checks.sh
+. "$ROOT_DIR/scripts/lib/checks.sh"
+
+MANIFEST_DIR="$ROOT_DIR/k8s"
+RENDERED_DIR=""
 
 cleanup() {
   kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  [[ -n "$RENDERED_DIR" ]] && rm -rf "$RENDERED_DIR"
+  return 0
 }
 trap cleanup EXIT
 
@@ -75,7 +78,9 @@ ingress_body() {
     "${INGRESS_ADDR}${path}" 2>/dev/null || true
 }
 
-echo "0. Preflight"
+check_title "Smoke test :: exposure, auth, config and network policy"
+
+check_section "0. Preflight"
 for BIN in kubectl kind; do
   command -v "$BIN" >/dev/null 2>&1 || { echo "$BIN not on PATH." >&2; exit 1; }
 done
@@ -106,7 +111,19 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-file=token="$SECRET_FILE" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-kubectl -n "$NAMESPACE" apply -f "$ROOT_DIR/k8s/" >/dev/null
+# Rendered to a temp dir, not patched after applying: one rollout, not two.
+if [[ -n "$IMAGE_OVERRIDE" ]]; then
+  RENDERED_DIR="$(mktemp -d)"
+  cp "$ROOT_DIR"/k8s/*.yaml "$RENDERED_DIR/"
+  sed -E "s|^([[:space:]]+image:[[:space:]]+).*$|\1${IMAGE_OVERRIDE}|" \
+    "$ROOT_DIR/k8s/deployment.yaml" > "$RENDERED_DIR/deployment.yaml"
+  grep -q "image: ${IMAGE_OVERRIDE}$" "$RENDERED_DIR/deployment.yaml" \
+    || { echo "could not substitute the image into deployment.yaml" >&2; exit 1; }
+  MANIFEST_DIR="$RENDERED_DIR"
+  info "testing $IMAGE_OVERRIDE in place of the image in k8s/deployment.yaml"
+fi
+
+kubectl -n "$NAMESPACE" apply -f "$MANIFEST_DIR/" >/dev/null
 kubectl -n "$NAMESPACE" rollout status "deploy/$DEPLOYMENT" --timeout=300s >/dev/null
 info "deployment rolled out"
 
@@ -117,8 +134,7 @@ kubectl -n "$PROBE_NS" run "$PROBE_POD" --image="$PROBE_IMAGE" --restart=Never \
   --command -- sleep 3600 >/dev/null
 kubectl -n "$PROBE_NS" wait --for=condition=Ready "pod/$PROBE_POD" --timeout=120s >/dev/null
 
-echo
-echo "1. Is the app kept off the public path?"
+check_section "1. Is the app kept off the public path?"
 # The claim in issue #4 is not "an Ingress exists", it is "nothing else is a way
 # in". A NodePort added later would satisfy the first and break the second.
 EXPOSED="$(kubectl -n "$NAMESPACE" get svc -l "$SELECTOR" \
@@ -131,8 +147,7 @@ else
   pass "ClusterIP only: $EXPOSED"
 fi
 
-echo
-echo "2. Does traffic reach the app through the ingress?"
+check_section "2. Does traffic reach the app through the ingress?"
 CODE="$(ingress_curl /health)"
 if [[ "$CODE" == "200" ]]; then
   pass "/health returned 200 via ${INGRESS_ADDR} (Host: ${INGRESS_HOSTNAME})"
@@ -143,8 +158,7 @@ fi
 CODE="$(ingress_curl /)"
 [[ "$CODE" == "200" ]] && pass "/ returned 200" || fail "/ returned ${CODE}"
 
-echo
-echo "3. Is the mounted secret actually enforcing auth?"
+check_section "3. Is the mounted secret actually enforcing auth?"
 # This is the real test of the #5 wiring. A 401 without a token and a 200 with
 # it can only both happen if the process read the file from the path the
 # ConfigMap gave it, so it proves the ConfigMap and Secret plumbing end to end.
@@ -178,8 +192,7 @@ CODE="$(ingress_curl /ping -H "Authorization: Bearer not-the-token")"
   && pass "/ping with a wrong token returned 401" \
   || fail "/ping with a wrong token returned ${CODE}, expected 401"
 
-echo
-echo "4. Is runtime config external to the image?"
+check_section "4. Is runtime config external to the image?"
 INLINE_ENV="$(kubectl -n "$NAMESPACE" get deploy "$DEPLOYMENT" \
   -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null || true)"
 FROM_CM="$(kubectl -n "$NAMESPACE" get deploy "$DEPLOYMENT" \
@@ -192,8 +205,7 @@ else
   pass "config comes from ConfigMap/${FROM_CM}, so a change needs no rebuild"
 fi
 
-echo
-echo "5. Where did the running image come from?"
+check_section "5. Where did the running image come from?"
 IMAGE_IDS="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" \
   -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}' \
   2>/dev/null | sort -u)"
@@ -217,8 +229,7 @@ else
   fail "no running pods on ${NODE_ARCH}; the image may lack this architecture"
 fi
 
-echo
-echo "6. Is the NetworkPolicy actually enforced?"
+check_section "6. Is the NetworkPolicy actually enforced?"
 POD_IP="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" \
   --field-selector status.phase=Running \
   -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
@@ -269,10 +280,8 @@ else
   fi
 fi
 
-echo
-echo "passed $PASS, failed $FAIL, skipped $SKIP"
-if [[ "$FAIL" -eq 0 ]]; then
-  echo
-  echo "Rollout availability is a separate claim: ./scripts/verify-zdd.sh"
+if [[ "$CHECK_FAIL" -eq 0 ]]; then
+  info "rollout availability is a separate claim: ./scripts/verify-zdd.sh"
 fi
-[[ "$FAIL" -eq 0 ]]
+
+check_summary
