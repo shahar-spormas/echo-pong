@@ -7,6 +7,9 @@
 | **Verification** | `scripts/smoke-test.sh` check 5 |
 | **Image** | `ghcr.io/shahar-spormas/echo-pong:v0.1.0` |
 
+> The multi-arch build described here was done by hand. It is now
+> `.github/workflows/ci.yml`; see "How this is built now" at the end.
+
 ## Decision
 
 One tag resolves to both architectures, the cluster fetches it from GHCR rather
@@ -69,7 +72,7 @@ pool and letting the scheduler fill it is the version that does not rot.
 That leaves the workload with one obligation, which is to be genuinely
 architecture-agnostic so the infrastructure is free to choose. That is exactly
 what the image index above provides, and it is what
-`.github/workflows/k8s-e2e.yml` checks by running the whole suite on both an
+`.github/workflows/ci.yml` checks by running the whole suite on both an
 amd64 and an arm64 runner. Preference expressed as a scheduling hint is a claim;
 a green build on both architectures is evidence.
 
@@ -115,10 +118,11 @@ Successfully pulled image "ghcr.io/shahar-spormas/echo-pong:v0.1.0" in 3.889s.
 Image size: 2962477 bytes.
 ```
 
-Check 5 is gated behind `ASSERT_REGISTRY_PULL`, off by default, because
-pull-request builds in `.github/workflows/k8s-e2e.yml` side-load a
-locally-built image under the same reference. Asserting a registry pull there
-would be asserting something the pipeline deliberately did not do.
+Check 5 is gated behind `ASSERT_REGISTRY_PULL`, off by default, because CI
+side-loads the image it just built and asserting a registry pull there would be
+asserting something the pipeline deliberately did not do. The registry path is
+proven instead by `do_verify_published`, which pulls the published tag once per
+architecture.
 
 ## Registry credentials
 
@@ -164,25 +168,58 @@ running. The digest is recorded above precisely so that is possible.
 except that it silently becomes `Always` when the tag is `latest`. That is one
 of several reasons this never deploys `latest`.
 
+## How this is built now
+
+`.github/workflows/ci.yml` does what the section above did by hand, and issue #7
+is closed by it. The shape:
+
+- Each architecture builds on a runner of that architecture — `ubuntu-24.04` and
+  `ubuntu-24.04-arm` — rather than one runner emulating the other through QEMU.
+  The `Dockerfile` already cross-compiles from `$BUILDPLATFORM`, so this is
+  about the evidence rather than the build: the whole Kubernetes suite runs on
+  both, and a green run on each is a stronger claim than a manifest that lists
+  two platforms.
+- The build happens once per architecture and is saved as a tarball. The scan,
+  the cluster test and the publish job all work from that tarball, so the thing
+  that gets shipped is the thing that was judged. Nothing is rebuilt in between.
+- The scan and the cluster test are sibling jobs rather than consecutive steps,
+  so a scan failure does not hide the rollout result, and each installs only the
+  tools it needs.
+- Publishing happens only on a push to `main`, and only after both the scan and
+  the cluster test have passed on both architectures. Pull requests are never
+  given registry credentials, so a fork cannot reach the registry at all.
+- Tags are `v<VERSION>-<7-char commit>`, from the `VERSION` file plus the
+  commit. No `latest`, no branch tags. The full commit is in the image's
+  `org.opencontainers.image.revision` label.
+- Before pushing, the job checks whether the tag already exists. Same revision
+  means a rerun and it is left alone; a different revision means two commits
+  shortened to the same seven characters, and it fails rather than repointing a
+  published tag.
+- `do_verify_published` then pulls the tag once per architecture and checks the
+  revision label, because an index entry is a promise and a pull is evidence.
+
+Attestations are turned off in CI. Buildx wraps even a single-platform build in
+an index whose extra manifests reference their subject by digest, and that
+survives `docker save` and `docker load` only on a daemon with the containerd
+image store — so the archive would be shaped differently depending on the
+runner. They were decorative anyway, since nothing verifies them at admission.
+
 ## What this does not cover
 
-There is no pipeline behind any of this yet. The image was built and pushed by
-hand, which is issue #7, and there is no versioning or release automation, which
-is issue #8. `.github/workflows/k8s-e2e.yml` builds an image, but only to test
-with, and never publishes.
+Versioning stops at snapshot tags. Every commit on `main` gets its own
+immutable tag, but there is no release process, no semver tag on the registry
+and no GitHub Release. That is issue #8, and it should attach a version to the
+digest this pipeline already published rather than rebuild it.
 
-Nothing is signed and nothing verifies provenance at admission. The attestations
-exist but are decorative until something checks them.
+Nothing is signed, and nothing verifies provenance at admission.
 
-There is no retention policy. Every push accumulates, and untagged manifests
-left behind by re-pushing a tag are invisible in the UI but still stored. That
-is issue #17.
+There is no retention policy. Every push accumulates, and a per-commit tagging
+scheme accumulates faster than the manual one it replaced. Untagged manifests
+left behind by re-pushing are invisible in the UI but still stored. Issue #17.
 
-No scheduled rebuild. `docs/security-risk-acceptance.md` makes the argument in
-detail: Go statically links the standard library, so a stdlib CVE cannot be
-patched by refreshing a base layer, and an image sitting untouched in the
-registry accumulates vulnerabilities while its source never changes. A build on
-a timer is required, not just builds on commit.
+No scheduled rebuild, so an image is only scanned against the advisory database
+as it stood on the day of its commit. `docs/security-risk-acceptance.md` has the
+argument in full.
 
 ## The same design on AWS
 

@@ -3,16 +3,6 @@ name: CI
 # Orchestration only; the steps live in .ci/ci_jobs.sh so they can be read,
 # linted and run without pushing a commit to find out.
 #
-#   static-checks
-#        |
-#      build (amd64, arm64)  ->  image tarball
-#        |            |
-#      scan          e2e            in parallel, both from that tarball
-#        |            |
-#         `-> publish <-'           only on a push to main
-#                |
-#         verify-published
-#
 # Actions are referenced by release tag, not commit SHA. A tag is mutable, so
 # this is a readability trade: the ones used here are all first-party
 # actions/*, and the tools that decide what actually gets tested and shipped

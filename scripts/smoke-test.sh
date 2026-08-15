@@ -2,7 +2,7 @@
 # End-to-end proof for issues #4, #5, #6 and #12: build state to serving
 # traffic, asserted rather than eyeballed.
 #
-# The same script runs on a laptop and in .github/workflows/k8s-e2e.yml. Nothing
+# The same script runs on a laptop and in .github/workflows/ci.yml. Nothing
 # is verified in CI that you cannot run here, and nothing here goes unverified
 # in CI, which is the only way a "repeatable local test path" stays true.
 
@@ -32,10 +32,9 @@ PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
 ASSERT_REGISTRY_PULL="${ASSERT_REGISTRY_PULL:-0}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/}"
 
-# Set IMAGE_OVERRIDE to test an image other than the one k8s/deployment.yaml
-# names. CI builds a uniquely tagged image per commit and points this at it,
-# because the tag in the manifest belongs to an already published release: left
-# alone, a run that failed to side-load would pull that older image and pass.
+# Names the image to test instead of the one in k8s/deployment.yaml, whose tag
+# is an already published release. CI points this at the build for the current
+# commit, so a run that failed to side-load cannot pull the old one and pass.
 IMAGE_OVERRIDE="${IMAGE_OVERRIDE:-}"
 
 PASS=0
@@ -117,8 +116,8 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-file=token="$SECRET_FILE" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-# Rendered into a temp directory rather than patched after applying, so there
-# is one rollout to wait on instead of two, the second racing the first.
+# Rendered to a temp directory rather than patched after applying, so there is
+# one rollout to wait on rather than two racing each other.
 if [[ -n "$IMAGE_OVERRIDE" ]]; then
   RENDERED_DIR="$(mktemp -d)"
   cp "$ROOT_DIR"/k8s/*.yaml "$RENDERED_DIR/"
