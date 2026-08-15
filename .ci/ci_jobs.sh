@@ -120,7 +120,7 @@ _require_pinned_or_local() {
 _fetch() {
     local url="$1" dest="$2"
 
-    curl --fail --silent --show-_error --location \
+    curl --fail --silent --show-error --location \
         --retry 3 --retry-connrefused --retry-delay 5 \
         -o "${dest}" "${url}" || _error "could not download ${url}"
 }
