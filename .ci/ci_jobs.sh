@@ -12,6 +12,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck source=.ci/consts.sh
 . "${ROOT_DIR}/.ci/consts.sh"
+# shellcheck source=.ci/report.sh
+. "${ROOT_DIR}/.ci/report.sh"
 
 SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_scan_image"
 SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_k8s_e2e do_publish_image do_verify_published"
@@ -23,6 +25,7 @@ PATH="${CI_BIN_DIR}:${PATH}"
 export PATH
 
 CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-${ROOT_DIR}/.ci-artifacts}"
+CI_REPORT_DIR="${CI_REPORT_DIR:-${CI_ARTIFACT_DIR}/reports}"
 CI_IMAGE_NAME="${CI_IMAGE_NAME:-${IMAGE_NAME}}"
 
 # ---------------------------------------------------------------------------
@@ -46,10 +49,18 @@ _warn() {
     fi
 }
 
-_summary() {
-    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-        printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"
-    fi
+# Banner and timing per stage, so a slow job can be read off the log without
+# opening the Actions timing view.
+_stage_begin() {
+    CI_STAGE="$*"
+    CI_STAGE_STARTED="$(date +%s)"
+    echo
+    printf '=== %s %s\n' "${CI_STAGE}" \
+        "$(printf '%*s' $((66 - ${#CI_STAGE})) '' | tr ' ' '=')"
+}
+
+_stage_end() {
+    _info "${CI_STAGE}: done in $(($(date +%s) - CI_STAGE_STARTED))s"
 }
 
 _require_cmd() {
@@ -120,9 +131,11 @@ _require_pinned_or_local() {
 _fetch() {
     local url="$1" dest="$2"
 
+    _info "  GET ${url}"
     curl --fail --silent --show-error --location \
         --retry 3 --retry-connrefused --retry-delay 5 \
         -o "${dest}" "${url}" || _error "could not download ${url}"
+    _info "  $(wc -c < "${dest}" | tr -d ' ') bytes"
 }
 
 _fetch_verified() {
@@ -135,6 +148,7 @@ _fetch_verified() {
         rm -f "${dest}"
         _error "checksum mismatch for ${url}: expected ${expected}, got ${actual}"
     fi
+    _info "  sha256 ${actual} matches the pin"
 }
 
 # Reads KIND_SHA256_amd64 and friends, so consts.sh can stay a flat list.
@@ -261,26 +275,54 @@ _registry_login() {
 # ---------------------------------------------------------------------------
 
 do_static_checks() {
-    _info "Stage: static checks"
-    mkdir -p "${CI_BIN_DIR}"
-    _require_cmd curl sha256sum tar shellcheck
+    _stage_begin "Static checks"
+    mkdir -p "${CI_BIN_DIR}" "${CI_REPORT_DIR}"
+    _require_cmd curl sha256sum tar shellcheck jq
     _install_actionlint "$(_ci_arch)"
 
-    actionlint
-
-    local failures=0 script
+    local scripts=() script
     while IFS= read -r script; do
-        bash -n "${script}" || failures=$((failures + 1))
+        scripts+=("${script}")
     done < <(find "${ROOT_DIR}/scripts" "${ROOT_DIR}/.ci" -name '*.sh' -type f | sort)
-    [ "${failures}" -eq 0 ] || _error "${failures} script(s) failed the syntax check"
+    _info "checking ${#scripts[@]} shell script(s) and $(find "${ROOT_DIR}/.github/workflows" -name '*.yml' | wc -l | tr -d ' ') workflow(s)"
+
+    local syntax=0
+    for script in "${scripts[@]}"; do
+        if bash -n "${script}" 2>&1; then
+            _info "  [V] bash -n ${script#"${ROOT_DIR}"/}"
+        else
+            _info "  [X] bash -n ${script#"${ROOT_DIR}"/}"
+            syntax=$((syntax + 1))
+        fi
+    done
+
+    # Both tools write a machine-readable report and are rendered from it, so
+    # the console output and the artifact cannot disagree.
+    local sc_json="${CI_REPORT_DIR}/shellcheck.json"
+    local al_json="${CI_REPORT_DIR}/actionlint.json"
 
     # Warnings and errors only: a gate that fires on style notices gets muted,
     # and then nobody reads the warnings either.
     # SC1091: consts.sh is sourced through a path shellcheck cannot follow.
     shellcheck --severity=warning --external-sources --exclude=SC1091 \
-        "${ROOT_DIR}"/scripts/*.sh "${ROOT_DIR}"/.ci/*.sh
+        --format=json "${scripts[@]}" > "${sc_json}" || true
+    actionlint -format '{{json .}}' > "${al_json}" || true
+
+    local sc_count al_count
+    sc_count="$(jq 'length' "${sc_json}")"
+    al_count="$(jq 'length' "${al_json}")"
+
+    jq -r '.[] | "  [X] \(.file):\(.line):\(.column) SC\(.code) (\(.level)) \(.message)"' "${sc_json}"
+    jq -r '.[] | "  [X] \(.filepath):\(.line):\(.column) [\(.kind)] \(.message)"' "${al_json}"
+
+    _static_report "${#scripts[@]}" "${syntax}" "${sc_count}" "${al_count}"
+
+    [ "${syntax}" -eq 0 ] || _error "${syntax} script(s) failed the syntax check"
+    [ "${sc_count}" -eq 0 ] || _error "shellcheck reported ${sc_count} finding(s) at warning or above"
+    [ "${al_count}" -eq 0 ] || _error "actionlint reported ${al_count} finding(s)"
 
     _info "static checks passed"
+    _stage_end
 }
 
 # Takes the tools to install, or installs all of them. Named, because the scan
@@ -306,7 +348,7 @@ do_setup_tools() {
 # runner builds for its own processor. The tarball is what the publish job
 # ships, so the registry gets the bytes that were tested, not a rebuild.
 do_build_image() {
-    _info "Stage: build"
+    _stage_begin "Build linux/$(_ci_arch)"
     _require_cmd docker
     local ref arch archive
     ref="$(_ci_image_ref)"
@@ -330,9 +372,13 @@ do_build_image() {
         "${ROOT_DIR}" || _error "image build failed"
 
     docker save --output "${archive}" "${ref}"
-    _info "saved $(du -h "${archive}" | cut -f1) to ${archive}"
 
-    _summary "- Built \`${ref}\` for \`linux/${arch}\`"
+    _info "image    ${ref}"
+    _info "digest   $(docker image inspect "${ref}" --format '{{.Id}}')"
+    _info "revision $(_ci_commit_sha)"
+    _info "size     $(docker image inspect "${ref}" --format '{{.Size}}') bytes uncompressed"
+    _info "archive  ${archive} ($(wc -c < "${archive}" | tr -d ' ') bytes)"
+    _stage_end
 }
 
 do_print_version() {
@@ -343,14 +389,19 @@ do_print_version() {
 # .trivyignore.yaml are reported and allowed through until they expire;
 # anything else at HIGH or CRITICAL fails here, before the publish job (#10).
 do_scan_image() {
-    _info "Stage: scan"
+    _stage_begin "Scan linux/$(_ci_arch)"
     _require_cmd trivy jq
-    local archive report blocking suppressed
+    local archive report blocking suppressed arch
+    arch="$(_ci_arch)"
     archive="$(_ci_image_archive)"
     report="$(_ci_scan_report)"
 
     [ -f "${archive}" ] || _error "no image archive at ${archive}; run do_build_image first"
-    mkdir -p "${CI_ARTIFACT_DIR}"
+    mkdir -p "${CI_ARTIFACT_DIR}" "${CI_REPORT_DIR}"
+
+    _info "trivy $(trivy --version | awk 'NR==1 {print $2}'), severity ${SCAN_SEVERITY}"
+    _info "target ${archive} ($(wc -c < "${archive}" | tr -d ' ') bytes)"
+    _info "accepted risks from $(grep -c '^  - id:' "${ROOT_DIR}/.trivyignore.yaml") entr(y|ies) in .trivyignore.yaml"
 
     # --exit-code 0 because the policy below needs the report to exist to apply
     # it; trivy still exits non-zero if the scan or database itself failed, and
@@ -367,6 +418,16 @@ do_scan_image() {
         --output "${report}" \
         --exit-code 0 \
         --quiet || _error "trivy failed to scan ${archive}"
+
+    # The same findings in the two formats anyone downstream would ask for: a
+    # table to read and SARIF for whatever consumes scanner output.
+    trivy convert --quiet --format table --show-suppressed \
+        --output "${CI_REPORT_DIR}/trivy-${arch}.txt" "${report}"
+    trivy convert --quiet --format sarif \
+        --output "${CI_REPORT_DIR}/trivy-${arch}.sarif" "${report}"
+    cp "${report}" "${CI_REPORT_DIR}/trivy-${arch}.json"
+
+    _info "packages scanned: $(jq '[.Results[]?.Packages[]?] | length' "${report}")"
 
     # Suppressed entries nest the vulnerability under .Finding; reading
     # .Severity at the top level matches nothing and reports every run clean.
@@ -386,17 +447,21 @@ do_scan_image() {
         jq -r '.Results[]?.Vulnerabilities[]?
             | select(.Severity == "HIGH" or .Severity == "CRITICAL")
             | "  BLOCKING  \(.Severity)  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion)  fixed in: \(.FixedVersion // "no fix")"' "${report}"
-        _summary "- Scan **failed** on \`linux/$(_ci_arch)\`: ${blocking} unapproved finding(s)"
+    fi
+
+    _scan_report "${arch}" "${report}" "${blocking}" "${suppressed}"
+
+    if [ "${blocking}" -gt 0 ]; then
         _error "${blocking} unapproved ${SCAN_SEVERITY} finding(s). Fix them, or record an expiring exception in .trivyignore.yaml with the reasoning in docs/security-risk-acceptance.md"
     fi
 
     _info "no unapproved ${SCAN_SEVERITY} findings (${suppressed} accepted)"
-    _summary "- Scan passed on \`linux/$(_ci_arch)\`: 0 unapproved, ${suppressed} accepted"
+    _stage_end
 }
 
 # The same scripts a developer runs locally, against the image this run built.
 do_k8s_e2e() {
-    _info "Stage: Kubernetes end-to-end"
+    _stage_begin "Kubernetes end-to-end linux/$(_ci_arch)"
     _require_cmd docker kind kubectl
     local ref archive
     ref="$(_ci_image_ref)"
@@ -415,13 +480,29 @@ do_k8s_e2e() {
 
     _preload_probe_image
 
+    # Both scripts record every result to a file as well as printing it, and
+    # both run even if the first fails: two reports are more use than one plus
+    # an early exit.
+    local arch smoke zdd smoke_rc=0 zdd_rc=0
+    arch="$(_ci_arch)"
+    smoke="${CI_REPORT_DIR}/e2e-${arch}-smoke.tsv"
+    zdd="${CI_REPORT_DIR}/e2e-${arch}-zdd.tsv"
+    mkdir -p "${CI_REPORT_DIR}"
+    : > "${smoke}"
+    : > "${zdd}"
+
     # IMAGE_OVERRIDE names the image under test. The tag in k8s/deployment.yaml
     # is an already published release, so without this a run that failed to
     # side-load would pull that one and pass for code it never ran.
-    IMAGE_OVERRIDE="${ref}" ASSERT_REGISTRY_PULL=0 "${ROOT_DIR}/scripts/smoke-test.sh"
-    "${ROOT_DIR}/scripts/verify-zdd.sh"
+    CHECK_REPORT="${smoke}" IMAGE_OVERRIDE="${ref}" ASSERT_REGISTRY_PULL=0 \
+        "${ROOT_DIR}/scripts/smoke-test.sh" || smoke_rc=$?
+    CHECK_REPORT="${zdd}" "${ROOT_DIR}/scripts/verify-zdd.sh" || zdd_rc=$?
 
-    _summary "- Kubernetes end-to-end passed on \`linux/$(_ci_arch)\`"
+    _e2e_report "${arch}" "${smoke}" "${smoke_rc}" "${zdd}" "${zdd_rc}"
+
+    [ "${smoke_rc}" -eq 0 ] && [ "${zdd_rc}" -eq 0 ] \
+        || _error "the Kubernetes suite failed on linux/${arch}"
+    _stage_end
 }
 
 # smoke-test.sh and verify-zdd.sh each run a curl pod, so the node would pull
@@ -456,7 +537,7 @@ _verify_cluster_version() {
 # Reached only from a push to the default branch, so a pull request never holds
 # credentials for this.
 do_publish_image() {
-    _info "Stage: publish"
+    _stage_begin "Publish"
     _require_cmd docker jq
     local ref published_revision arch archive
     ref="$(_ci_image_ref)"
@@ -466,7 +547,10 @@ do_publish_image() {
     if published_revision="$(_published_revision_of "${ref}")"; then
         if [ "${published_revision}" = "$(_ci_commit_sha)" ]; then
             _warn "${ref} is already published for this commit; leaving it alone"
-            _summary "- \`${ref}\` was already published for this commit"
+            _publish_report "${ref}" \
+                "$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
+                "${published_revision}"
+            _stage_end
             return 0
         fi
         _error "${ref} exists and was built from ${published_revision}, not $(_ci_commit_sha): the short SHA collided, so bump VERSION rather than repointing a published tag"
@@ -489,8 +573,12 @@ do_publish_image() {
     _info "assembling the multi-architecture manifest for ${ref}"
     docker buildx imagetools create --tag "${ref}" "${arch_refs[@]}"
 
-    _summary "- Published \`${ref}\` (\`linux/amd64\`, \`linux/arm64\`)"
+    _publish_report "${ref}" \
+        "$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
+        "$(_ci_commit_sha)"
+
     _info "published ${ref}"
+    _stage_end
 }
 
 # Echoes the revision of an already-published tag, or fails if there is none.
@@ -507,7 +595,7 @@ _published_revision_of() {
 # Everything above ran against local images. This is the only step that asks
 # the registry, and the only evidence that the published tag resolves.
 do_verify_published() {
-    _info "Stage: verify published image"
+    _stage_begin "Verify published image"
     _require_cmd docker jq
     local ref platforms revision want arch failures=0
     ref="$(_ci_image_ref)"
@@ -551,15 +639,17 @@ do_verify_published() {
         fi
     done
 
+    _verify_report "${ref}" "$(_ci_commit_sha)" "${failures}"
+
     [ "${failures}" -eq 0 ] || _error "${failures} check(s) failed for ${ref}"
 
-    _summary "- Verified \`${ref}\` pulls for both architectures"
     _info "${ref} verified"
+    _stage_end
 }
 
 # Best-effort: the cluster may not exist, which is itself part of the answer.
 do_diagnostics() {
-    _info "Stage: diagnostics"
+    _stage_begin "Diagnostics"
     command -v kubectl >/dev/null 2>&1 || { _info "kubectl unavailable"; return 0; }
 
     kubectl get all,ingress,netpol -A || true

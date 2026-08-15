@@ -32,7 +32,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
-      - run: ./.ci/ci_jobs.sh do_static_checks
+
+      - name: Static checks
+        run: ./.ci/ci_jobs.sh do_static_checks
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: report-static-checks
+          path: .ci-artifacts/reports/
+          retention-days: 7
+          if-no-files-found: warn
 
   build:
     name: build (${{ matrix.arch }})
@@ -99,12 +110,12 @@ jobs:
         run: ./.ci/ci_jobs.sh do_scan_image
 
       # Also on failure, which is when the report is worth reading.
-      - name: Upload scan report
+      - name: Upload report
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: scan-${{ matrix.arch }}
-          path: .ci-artifacts/trivy-${{ matrix.arch }}.json
+          name: report-scan-${{ matrix.arch }}
+          path: .ci-artifacts/reports/
           retention-days: 7
           if-no-files-found: warn
 
@@ -142,6 +153,15 @@ jobs:
         if: failure()
         run: ./.ci/ci_jobs.sh do_diagnostics
 
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: report-e2e-${{ matrix.arch }}
+          path: .ci-artifacts/reports/
+          retention-days: 7
+          if-no-files-found: warn
+
   publish:
     name: Publish
     # Both gates, both architectures. The scan is what keeps an unapproved
@@ -174,6 +194,15 @@ jobs:
           CI_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.ci/ci_jobs.sh do_publish_image
 
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: report-publish
+          path: .ci-artifacts/reports/
+          retention-days: 7
+          if-no-files-found: warn
+
   verify-published:
     name: Verify published image
     needs: publish
@@ -190,3 +219,12 @@ jobs:
           CI_REGISTRY_USER: ${{ github.actor }}
           CI_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.ci/ci_jobs.sh do_verify_published
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: report-verify-published
+          path: .ci-artifacts/reports/
+          retention-days: 7
+          if-no-files-found: warn
