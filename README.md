@@ -110,6 +110,7 @@ Each document states a decision, the evidence for it, and what it does not cover
 - `docs/deployment-design.md` — zero-downtime rollouts: probes, the `preStop` hook, and the disruption budget
 - `docs/exposure-design.md` — Service, Ingress, the NetworkPolicy, and why the ingress controller is a retired project
 - `docs/runtime-config.md` — ConfigMap and Secret wiring, and the couplings that span files
+- `docs/image-and-registry.md` — multi-arch build, the registry pull, and architecture preference
 - `docs/security-risk-acceptance.md` — the Go 1.24 standard library CVEs, and why they are accepted
 
 ---
