@@ -204,12 +204,53 @@ survives `docker save` and `docker load` only on a daemon with the containerd
 image store — so the archive would be shaped differently depending on the
 runner. They were decorative anyway, since nothing verifies them at admission.
 
+## Tags
+
+Two kinds to deploy:
+
+| Trigger | Tag | Means |
+|---|---|---|
+| push to `main` | `v<VERSION>-<7-char commit>` | a snapshot of that commit |
+| push of `v1.2.3` | `v1.2.3` | a release |
+
+Either one is a multi-architecture index, so a client gets the platform it asked
+for and `k8s/deployment.yaml` names no architecture.
+
+No `latest`. It is the one tag that cannot say what it contains, it silently
+flips `imagePullPolicy` to `Always`, and a rollback needs a name that still
+means what it meant yesterday.
+
+A third kind shows up on the package page, `…-amd64` and `…-arm64`, and is not
+a third image. `do_publish_image` pushes each architecture under its own tag and
+then combines them, so those names point at the very manifests the index already
+references — identical digests, no extra storage. They cannot be deleted either:
+a GHCR version *is* a manifest, so removing one would break the index that
+points at it. Losing the names would mean pushing the architectures untagged,
+which needs either `push-by-digest` (and publishing before the scan and cluster
+tests, which is the ordering this pipeline exists to protect) or a tool like
+`crane`. Neither trade is worth a tidier package page.
+
+A release runs the whole pipeline again rather than re-tagging the digest `main`
+published. That costs a rebuild and means the release digest differs from the
+snapshot digest of the same commit, since a Go build is not bit-reproducible
+across runs. What it buys is that the artifact carrying the release name was
+itself scanned and cluster-tested under that name, with no promotion step to
+get wrong. The alternative, `imagetools create` against the existing digest, is
+cheaper and worth revisiting if release volume ever justifies it.
+
+The tag and the `VERSION` file have to agree. `v1.2.3` against a tree saying
+`0.1.0` fails before anything is built, because a release cut from a tree that
+disagrees about its own version is not worth publishing.
+
+Neither kind of tag is ever moved. `do_publish_image` reads the revision label
+off whatever is already at that tag: same commit means a rerun and it is left
+alone, a different commit fails. For a release the message says to cut a new
+version; for a snapshot it says two commits shortened to the same prefix.
+
 ## What this does not cover
 
-Versioning stops at snapshot tags. Every commit on `main` gets its own
-immutable tag, but there is no release process, no semver tag on the registry
-and no GitHub Release. That is issue #8, and it should attach a version to the
-digest this pipeline already published rather than rebuild it.
+No GitHub Release object accompanies the tag, so there are no release notes and
+no attached binaries. Binaries are issue #9.
 
 Nothing is signed, and nothing verifies provenance at admission.
 

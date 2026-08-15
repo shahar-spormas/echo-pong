@@ -11,6 +11,9 @@ on:
   pull_request:
   push:
     branches: [main]
+    # A release runs the whole pipeline again rather than re-tagging what main
+    # published: the same gates, then the tag itself as the image version.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +26,9 @@ concurrency:
 env:
   # On a pull request, the merge commit, which is what checkout gives us.
   CI_COMMIT_SHA: ${{ github.sha }}
+  # Set only for a tag push, where it becomes the image version and has to
+  # agree with the VERSION file. Empty elsewhere, giving v<VERSION>-<sha>.
+  CI_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
 
 jobs:
   static-checks:
@@ -76,6 +82,10 @@ jobs:
       - name: Build
         run: ./.ci/ci_jobs.sh do_build_image
 
+      # Taken from the image, so a released binary is the tested executable.
+      - name: Extract binary
+        run: ./.ci/ci_jobs.sh do_extract_binary
+
       # Everything downstream works from this tarball: one build, not three.
       - name: Upload image
         uses: actions/upload-artifact@v7.0.1
@@ -83,6 +93,14 @@ jobs:
           name: image-${{ matrix.arch }}
           path: .ci-artifacts/image-${{ matrix.arch }}.tar
           retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: binary-${{ matrix.arch }}
+          path: .ci-artifacts/ping-pong-app-linux-${{ matrix.arch }}
+          retention-days: 7
           if-no-files-found: error
 
   scan:
@@ -165,11 +183,12 @@ jobs:
     # Both gates, both architectures: this is what keeps an unapproved
     # HIGH or CRITICAL finding out of the registry.
     needs: [scan, e2e]
-    # The only job that can write to the registry. github.repository stops a
-    # fork's own main publishing here.
+    # The only job that can write to the registry: a push to main for a snapshot
+    # tag, or a version tag for a release. github.repository stops a fork's own
+    # main publishing here.
     if: >-
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
       github.repository == 'shahar-spormas/echo-pong'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -223,6 +242,43 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: report-verify-published
+          path: .ci-artifacts/reports/
+          retention-days: 7
+          if-no-files-found: warn
+
+  release:
+    name: GitHub Release
+    # Only for a tag, and only once the image it names is published and pulled,
+    # so the release cannot point at something that failed verification.
+    needs: verify-published
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          # Generated notes compare against the previous tag.
+          fetch-depth: 0
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: .ci-artifacts
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./.ci/ci_jobs.sh do_github_release
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: report-release
           path: .ci-artifacts/reports/
           retention-days: 7
           if-no-files-found: warn

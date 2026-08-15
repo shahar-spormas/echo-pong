@@ -133,9 +133,17 @@ credentials.
 
 A few things worth knowing:
 
-- **Versions.** Each build is `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char
-  commit>`, from the `VERSION` file plus the commit. No `latest`. Release tags
-  are issue #8.
+- **Versions.** A push to `main` publishes a snapshot,
+  `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char commit>`. Pushing a
+  `v1.2.3` tag runs the same gates, publishes `v1.2.3`, and attaches the Linux
+  `amd64` and `arm64` binaries to a GitHub Release. No `latest`, and no
+  published tag is ever moved. Cutting a release is two steps:
+
+```bash
+# VERSION and the tag have to agree, or the run fails before it builds.
+echo 1.2.3 > VERSION && git commit -am 'release 1.2.3' && git push
+git tag v1.2.3 && git push origin v1.2.3
+```
 - **Tools.** kind, kubectl, Trivy and actionlint are pinned in `.ci/consts.sh`
   rather than taken from whatever the runner image ships. kind and kubectl are
   checksum-verified too, since they decide the Kubernetes version under test.
@@ -143,7 +151,30 @@ A few things worth knowing:
   in `.trivyignore.yaml`, where every entry expires on 2026-09-07. See
   `docs/security-risk-acceptance.md`.
 - **What gets published.** The image the publish job pushes is the tarball the
-  tests ran against, not a rebuild.
+  tests ran against, not a rebuild. The released binary is lifted out of that
+  same image rather than compiled again.
+
+### Running a release binary
+
+For anyone who wants the CLI without Docker or a cluster:
+
+```bash
+TAG=v0.1.0
+BASE=https://github.com/shahar-spormas/echo-pong/releases/download/$TAG
+curl -LO $BASE/ping-pong-app-linux-amd64      # or -linux-arm64
+curl -LO $BASE/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+chmod +x ping-pong-app-linux-amd64
+```
+
+Both modes read the secret from the file named by `SECRET_FILE_PATH`. In CLI
+mode `--password` is the value checked against it:
+
+```bash
+echo -n mysecret > token
+SECRET_FILE_PATH=./token ./ping-pong-app-linux-amd64 --mode=cli --password=mysecret ping
+SECRET_FILE_PATH=./token ./ping-pong-app-linux-amd64 --mode=server
+```
 
 ---
 
