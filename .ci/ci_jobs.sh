@@ -14,7 +14,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/.ci/consts.sh"
 
 SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_scan_image"
-SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_k8s_e2e"
+SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_k8s_e2e do_publish_image do_verify_published"
 SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_print_version do_diagnostics"
 
 # Pinned tools go here rather than /usr/local/bin, so no job needs sudo.
@@ -249,6 +249,13 @@ _install_actionlint() {
         || _error "installed actionlint reports ${installed}, expected ${ACTIONLINT_VERSION}"
 }
 
+_registry_login() {
+    [ -n "${CI_REGISTRY_TOKEN:-}" ] || _error "CI_REGISTRY_TOKEN is not set"
+    [ -n "${CI_REGISTRY_USER:-}" ] || _error "CI_REGISTRY_USER is not set"
+    printf '%s' "${CI_REGISTRY_TOKEN}" \
+        | docker login "${REGISTRY}" --username "${CI_REGISTRY_USER}" --password-stdin
+}
+
 # ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
@@ -296,8 +303,8 @@ do_setup_tools() {
 }
 
 # Native, no QEMU: the Dockerfile cross-compiles from BUILDPLATFORM and each
-# runner builds for its own processor. The tarball is what the scan and the
-# cluster test both work from, so they judge one build rather than three.
+# runner builds for its own processor. The tarball is what the publish job
+# ships, so the registry gets the bytes that were tested, not a rebuild.
 do_build_image() {
     _info "Stage: build"
     _require_cmd docker
@@ -334,7 +341,7 @@ do_print_version() {
 
 # Scans the archive, so what is judged is what was built. Entries in
 # .trivyignore.yaml are reported and allowed through until they expire;
-# anything else at HIGH or CRITICAL fails the job (#10).
+# anything else at HIGH or CRITICAL fails here, before the publish job (#10).
 do_scan_image() {
     _info "Stage: scan"
     _require_cmd trivy jq
@@ -444,6 +451,110 @@ _verify_cluster_version() {
         _error "cluster is running ${server}, expected ${KUBECTL_VERSION} from kind/cluster.yaml"
     fi
     _info "cluster is running ${server}"
+}
+
+# Reached only from a push to the default branch, so a pull request never holds
+# credentials for this.
+do_publish_image() {
+    _info "Stage: publish"
+    _require_cmd docker jq
+    local ref published_revision arch archive
+    ref="$(_ci_image_ref)"
+
+    _registry_login
+
+    if published_revision="$(_published_revision_of "${ref}")"; then
+        if [ "${published_revision}" = "$(_ci_commit_sha)" ]; then
+            _warn "${ref} is already published for this commit; leaving it alone"
+            _summary "- \`${ref}\` was already published for this commit"
+            return 0
+        fi
+        _error "${ref} exists and was built from ${published_revision}, not $(_ci_commit_sha): the short SHA collided, so bump VERSION rather than repointing a published tag"
+    fi
+
+    local arch_refs=()
+    for arch in amd64 arm64; do
+        archive="${CI_ARTIFACT_DIR}/image-${arch}.tar"
+        [ -f "${archive}" ] || _error "no tested archive for ${arch} at ${archive}"
+
+        # Tag immediately after each load: both archives carry the same tag, so
+        # loading the second one repoints it.
+        _info "loading and pushing the tested ${arch} image"
+        docker load --input "${archive}" >/dev/null
+        docker tag "${ref}" "${ref}-${arch}"
+        docker push --quiet "${ref}-${arch}"
+        arch_refs+=("${ref}-${arch}")
+    done
+
+    _info "assembling the multi-architecture manifest for ${ref}"
+    docker buildx imagetools create --tag "${ref}" "${arch_refs[@]}"
+
+    _summary "- Published \`${ref}\` (\`linux/amd64\`, \`linux/arm64\`)"
+    _info "published ${ref}"
+}
+
+# Echoes the revision of an already-published tag, or fails if there is none.
+# Read off a pulled image, because the label lives in the config blob rather
+# than the index.
+_published_revision_of() {
+    local ref="$1"
+    docker buildx imagetools inspect "${ref}" >/dev/null 2>&1 || return 1
+    docker pull --quiet --platform linux/amd64 "${ref}" >/dev/null 2>&1 || return 1
+    docker image inspect "${ref}" \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+}
+
+# Everything above ran against local images. This is the only step that asks
+# the registry, and the only evidence that the published tag resolves.
+do_verify_published() {
+    _info "Stage: verify published image"
+    _require_cmd docker jq
+    local ref platforms revision want arch failures=0
+    ref="$(_ci_image_ref)"
+
+    if [ -n "${CI_REGISTRY_TOKEN:-}" ]; then
+        _registry_login
+    fi
+
+    docker buildx imagetools inspect "${ref}"
+
+    platforms="$(docker buildx imagetools inspect "${ref}" --raw \
+        | jq -r '[.manifests[]
+            | select(.platform.os != "unknown")
+            | "\(.platform.os)/\(.platform.architecture)"] | sort | join(" ")')"
+
+    for want in linux/amd64 linux/arm64; do
+        case " ${platforms} " in
+            *" ${want} "*) _info "${want} present" ;;
+            *)
+                echo "  missing ${want} in ${ref} (found: ${platforms})" >&2
+                failures=$((failures + 1))
+                ;;
+        esac
+    done
+
+    # An index entry is a promise; a pull is evidence.
+    for arch in amd64 arm64; do
+        docker rmi "${ref}" >/dev/null 2>&1 || true
+        if ! docker pull --quiet --platform "linux/${arch}" "${ref}" >/dev/null; then
+            echo "  could not pull ${ref} for linux/${arch}" >&2
+            failures=$((failures + 1))
+            continue
+        fi
+        revision="$(docker image inspect "${ref}" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [ "${revision}" != "$(_ci_commit_sha)" ]; then
+            echo "  linux/${arch} reports revision ${revision}, expected $(_ci_commit_sha)" >&2
+            failures=$((failures + 1))
+        else
+            _info "pulled linux/${arch}, revision matches"
+        fi
+    done
+
+    [ "${failures}" -eq 0 ] || _error "${failures} check(s) failed for ${ref}"
+
+    _summary "- Verified \`${ref}\` pulls for both architectures"
+    _info "${ref} verified"
 }
 
 # Best-effort: the cluster may not exist, which is itself part of the answer.
