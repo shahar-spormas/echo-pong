@@ -6,6 +6,7 @@ secrets/
 .git/
 .gitignore
 .github/
+.ci/
 k8s/
 
 Dockerfile

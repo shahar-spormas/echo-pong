@@ -1,0 +1,60 @@
+name: CI
+
+# Orchestration only. What each step does lives in .ci/ci_jobs.sh, so the
+# pipeline can be read, linted and run without pushing a commit to find out.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: ./.ci/ci_jobs.sh do_static_checks
+
+  platform:
+    name: ${{ matrix.arch }}
+    needs: static-checks
+    # Native runners on both architectures, matched OS versions so the only
+    # deliberate difference between the two legs is the processor. A manifest
+    # listing two platforms is not evidence that either one boots.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CI_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned tools
+        run: ./.ci/ci_jobs.sh do_setup_tools
+
+      - name: Build
+        run: ./.ci/ci_jobs.sh do_build_image
+
+      - name: Kubernetes end-to-end
+        run: ./.ci/ci_jobs.sh do_k8s_e2e
+
+      - name: Diagnostics
+        if: failure()
+        run: ./.ci/ci_jobs.sh do_diagnostics
