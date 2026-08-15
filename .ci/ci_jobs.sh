@@ -104,6 +104,17 @@ _ci_image_version() {
     [ -f "${ROOT_DIR}/VERSION" ] || _error "no VERSION file at ${ROOT_DIR}/VERSION"
     base="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
     [ -n "${base}" ] || _error "VERSION is empty"
+
+    # A release tag publishes itself, v1.2.3, and must agree with VERSION: the
+    # file is what the tree claims to be, and a release cut from a tree that
+    # disagrees is the one thing worth refusing outright.
+    if [ -n "${CI_RELEASE_TAG:-}" ]; then
+        [ "${CI_RELEASE_TAG}" = "v${base}" ] \
+            || _error "tag ${CI_RELEASE_TAG} disagrees with VERSION (v${base}); bump the file or move the tag"
+        echo "${CI_RELEASE_TAG}"
+        return
+    fi
+
     echo "v${base}-$(_ci_short_sha)"
 }
 
@@ -577,7 +588,11 @@ do_publish_image() {
             _stage_end
             return 0
         fi
-        _error "${ref} exists and was built from ${published_revision}, not $(_ci_commit_sha): the short SHA collided, so bump VERSION rather than repointing a published tag"
+        # Same refusal either way, but the reason and the fix differ.
+        if [ -n "${CI_RELEASE_TAG:-}" ]; then
+            _error "${ref} was already released from ${published_revision}; a published release tag does not move. Cut a new version instead"
+        fi
+        _error "${ref} exists and was built from ${published_revision}, not $(_ci_commit_sha): two commits shortened to the same prefix, so bump VERSION"
     fi
 
     local arch_refs=()
@@ -690,6 +705,35 @@ do_verify_published() {
     [ "${failures}" -eq 0 ] || _error "${failures} check(s) failed for ${ref}"
 
     _info "${ref} verified"
+    _stage_end
+}
+
+# Records a release that is already published and verified by the time this
+# runs, so it creates nothing that has not been checked.
+do_github_release() {
+    _stage_begin "GitHub Release"
+    _require_cmd gh
+    local tag ref
+    tag="${CI_RELEASE_TAG:-}"
+    [ -n "${tag}" ] || _error "CI_RELEASE_TAG is not set; this job only runs for a tag"
+    ref="$(_ci_image_ref)"
+
+    if gh release view "${tag}" >/dev/null 2>&1; then
+        _warn "release ${tag} already exists; leaving it alone"
+    else
+        # --verify-tag so a typo cannot create a release against a tag that is
+        # not in the remote. --notes is prepended to the generated notes.
+        gh release create "${tag}" \
+            --verify-tag \
+            --generate-notes \
+            --notes "$(printf 'Container image:\n\n    docker pull %s\n' "${ref}")"
+        _info "created release ${tag}"
+    fi
+
+    report table name=release.md title="GitHub Release" \
+        "headers=|Item|Value" \
+        "row=PASS|Release|\`${tag}\`" \
+        "row=PASS|Image|\`${ref}\`"
     _stage_end
 }
 

@@ -133,9 +133,16 @@ credentials.
 
 A few things worth knowing:
 
-- **Versions.** Each build is `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char
-  commit>`, from the `VERSION` file plus the commit. No `latest`. Release tags
-  are issue #8.
+- **Versions.** A push to `main` publishes a snapshot,
+  `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char commit>`. Pushing a
+  `v1.2.3` tag runs the same gates and publishes `v1.2.3`. No `latest`, and no
+  published tag is ever moved. Cutting a release is two steps:
+
+```bash
+# VERSION and the tag have to agree, or the run fails before it builds.
+echo 1.2.3 > VERSION && git commit -am 'release 1.2.3' && git push
+git tag v1.2.3 && git push origin v1.2.3
+```
 - **Tools.** kind, kubectl, Trivy and actionlint are pinned in `.ci/consts.sh`
   rather than taken from whatever the runner image ships. kind and kubectl are
   checksum-verified too, since they decide the Kubernetes version under test.
