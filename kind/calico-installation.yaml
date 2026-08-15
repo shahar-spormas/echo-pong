@@ -1,0 +1,18 @@
+# Minimal Installation for the Tigera operator. Upstream's custom-resources.yaml
+# also ships an APIServer, Goldmane and Whisker; none are needed to enforce a
+# NetworkPolicy, and leaving them out keeps cluster creation faster in CI.
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+      - name: default-ipv4-ippool
+        blockSize: 26
+        # Must match networking.podSubnet in kind/cluster.yaml. A mismatch
+        # leaves pods with addresses the CNI will not route.
+        cidr: 10.244.0.0/16
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()

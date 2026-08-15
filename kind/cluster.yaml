@@ -1,0 +1,42 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: echo-pong-k8s
+networking:
+  # Calico replaces kindnet, which has no NetworkPolicy enforcer. Without this
+  # k8s/networkpolicy.yaml would be accepted by the API server and enforced by
+  # nobody. Nodes stay NotReady until scripts/cluster-up.sh installs Calico.
+  disableDefaultCNI: true
+  # Kind's default. Calico's shipped manifest uses 192.168.0.0/16, which
+  # collides with common home LAN ranges, so the pool is overridden to match
+  # this in kind/calico-installation.yaml rather than the other way round.
+  podSubnet: "10.244.0.0/16"
+nodes:
+  - role: control-plane
+    # Pinned by digest, and to 1.35 rather than 1.36 on purpose: ingress-nginx
+    # v1.15.1 is the project's final release and its support matrix stops at
+    # 1.35. Above the 1.30 floor that lifecycle.preStop.sleep needs.
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    kubeadmConfigPatches:
+      # The ingress-nginx kind manifest pins its controller to this label with a
+      # nodeSelector, so without it the controller never schedules.
+      #
+      # Must be a map. kind v0.32 still generates kubeadm.k8s.io/v1beta3, where
+      # kubeletExtraArgs is map[string]string, even though this Kubernetes
+      # version warns that the spec is deprecated. The v1beta4 list-of-name-value
+      # form fails to unmarshal and kubeadm init aborts.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # Publishes the ingress controller's hostPorts to the host. Without these
+      # the controller is reachable only from inside the node's network
+      # namespace, and the local demo has to fall back to a port-forward that
+      # bypasses the Service and EndpointSlices entirely.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ping-pong-config
+  labels:
+    app.kubernetes.io/name: ping-pong
+data:
+  PORT: "8080"
+  SECRET_FILE_PATH: /etc/ping-pong/secret

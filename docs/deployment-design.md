@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Status** | Verified on Kind (Kubernetes v1.36.1, single node, arm64) |
+| **Status** | Verified on Kind (Kubernetes v1.35.5, single node, arm64) |
 | **Component** | `k8s/deployment.yaml`, `k8s/pdb.yaml` |
 | **Verification** | `scripts/verify-zdd.sh` |
-| **Requires** | Kubernetes >= 1.30 for `lifecycle.preStop.sleep`, enforced as a preflight in `scripts/verify-zdd.sh` |
+| **Requires** | Kubernetes >= 1.30 for `lifecycle.preStop.sleep`, enforced as a preflight in `scripts/verify-zdd.sh`. The upper bound is 1.35, set by the ingress controller rather than by anything here; see `docs/exposure-design.md` |
 
 ## Decision
 
@@ -93,9 +93,12 @@ The secret is read once at startup, so rotation requires
 ## Verification
 
 Four checks: the first three diagnose the hook, the fourth is the claim itself.
-Check 4 needs the Service from #4, and all four need the Secret from #5. A
-`kubectl port-forward` is not a substitute for the Service, since it connects
-directly to one pod and never consults EndpointSlices.
+
+Check 4 probes through the ingress controller rather than hitting the Service
+directly, because `k8s/networkpolicy.yaml` now allows only the `ingress-nginx`
+namespace to reach the pods and a probe pod in `default` is dropped by design.
+A `kubectl port-forward` would not be a substitute either way, since it connects
+straight to one pod and never consults EndpointSlices.
 
 ```
 $ ./scripts/verify-zdd.sh
@@ -103,11 +106,11 @@ $ ./scripts/verify-zdd.sh
 1. Did the API server keep the preStop field?
   PASS  preStop retained: {"sleep":{"seconds":10}}
 2. Does termination actually wait?
-  PASS  deleting ping-pong-5f48d85546-dmlzw took 11s (hook ran)
+  PASS  deleting ping-pong-5674cd69c8-4kzr7 took 11s (hook ran)
 3. Did the kubelet complain?
   PASS  no FailedPreStopHook events
 4. Does traffic survive a rollout?
-        271 requests during the rollout, 271 x 200
+        272 requests during the rollout, 272 x 200
   PASS  zero non-200 responses across the rollout
 
 passed 4, failed 0, skipped 0
@@ -130,7 +133,11 @@ Checks 1 and 2 discriminate cleanly: 1s against 11s.
 **Check 4 does not.** It passed identically with and without the hook, so on
 this cluster it does not isolate the hook's contribution. On a single node,
 endpoint removal is a local kube-proxy rewrite measured in milliseconds, and at
-5 requests per second the window is never hit.
+5 requests per second the window is never hit. Routing the probe through the
+ingress adds a second reason: nginx retries the next upstream on a connection
+error, so a brief drop can be absorbed before the client ever sees it. The
+trade is deliberate, since the probe now takes the path production traffic
+takes.
 
 Raising the rate produced a misleading number worth recording so nobody repeats
 it. Three concurrent tight loops during a hookless rollout showed 29,723
@@ -169,9 +176,8 @@ cluster the replacement lands elsewhere and the drain proceeds one at a time.
 ## Reproducing this
 
 ```bash
-# Needs a cluster >= 1.30, the Secret from #5, the Service from #4.
-kubectl apply -f k8s/
-kubectl rollout status deploy/ping-pong
+./scripts/cluster-up.sh    # Kind >= 1.30, plus Calico and the ingress controller
+./scripts/smoke-test.sh    # creates the Secret and applies k8s/
 ./scripts/verify-zdd.sh
 
 # By hand:

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ping-pong
+  labels:
+    app.kubernetes.io/name: ping-pong
+spec:
+  # ClusterIP, not NodePort or LoadBalancer: the pods are reachable only from
+  # inside the cluster, and the ingress is the single way in. scripts/smoke-test.sh
+  # asserts no NodePort or LoadBalancer Service selects these pods.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ping-pong
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
