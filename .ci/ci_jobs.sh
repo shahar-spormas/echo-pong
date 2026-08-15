@@ -12,8 +12,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck source=.ci/consts.sh
 . "${ROOT_DIR}/.ci/consts.sh"
-# shellcheck source=.ci/report.sh
-. "${ROOT_DIR}/.ci/report.sh"
+
+# Markdown and the JSON the stages produce are rendered by .ci/report.py.
+_report() {
+    python3 "${ROOT_DIR}/.ci/report.py" "$1" "out=${CI_REPORT_DIR}" "${@:2}"
+}
 
 SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_scan_image"
 SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_k8s_e2e do_publish_image do_verify_published"
@@ -277,14 +280,17 @@ _registry_login() {
 do_static_checks() {
     _stage_begin "Static checks"
     mkdir -p "${CI_BIN_DIR}" "${CI_REPORT_DIR}"
-    _require_cmd curl sha256sum tar shellcheck jq
+    _require_cmd curl sha256sum tar shellcheck python3
     _install_actionlint "$(_ci_arch)"
 
-    local scripts=() script
+    local scripts=() pyfiles=() script
     while IFS= read -r script; do
         scripts+=("${script}")
     done < <(find "${ROOT_DIR}/scripts" "${ROOT_DIR}/.ci" -name '*.sh' -type f | sort)
-    _info "checking ${#scripts[@]} shell script(s) and $(find "${ROOT_DIR}/.github/workflows" -name '*.yml' | wc -l | tr -d ' ') workflow(s)"
+    while IFS= read -r script; do
+        pyfiles+=("${script}")
+    done < <(find "${ROOT_DIR}/.ci" -name '*.py' -type f | sort)
+    _info "checking ${#scripts[@]} shell script(s), ${#pyfiles[@]} python file(s) and $(find "${ROOT_DIR}/.github/workflows" -name '*.yml' | wc -l | tr -d ' ') workflow(s)"
 
     local syntax=0
     for script in "${scripts[@]}"; do
@@ -296,28 +302,35 @@ do_static_checks() {
         fi
     done
 
-    # Both tools write a machine-readable report and are rendered from it, so
-    # the console output and the artifact cannot disagree.
-    local sc_json="${CI_REPORT_DIR}/shellcheck.json"
-    local al_json="${CI_REPORT_DIR}/actionlint.json"
+    # The same check for the reporter, which is the one thing here that is not
+    # shell and would otherwise only be exercised at the end of a long job.
+    # ast.parse rather than py_compile, which would leave __pycache__ behind.
+    for script in "${pyfiles[@]}"; do
+        if python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "${script}"; then
+            _info "  [V] python syntax ${script#"${ROOT_DIR}"/}"
+        else
+            _info "  [X] python syntax ${script#"${ROOT_DIR}"/}"
+            syntax=$((syntax + 1))
+        fi
+    done
 
     # Warnings and errors only: a gate that fires on style notices gets muted,
     # and then nobody reads the warnings either.
     # SC1091: consts.sh is sourced through a path shellcheck cannot follow.
     shellcheck --severity=warning --external-sources --exclude=SC1091 \
-        --format=json "${scripts[@]}" > "${sc_json}" || true
-    actionlint -format '{{json .}}' > "${al_json}" || true
+        --format=json "${scripts[@]}" > "${CI_REPORT_DIR}/shellcheck.json" || true
+    actionlint -format '{{json .}}' > "${CI_REPORT_DIR}/actionlint.json" || true
 
     local sc_count al_count
-    sc_count="$(jq 'length' "${sc_json}")"
-    al_count="$(jq 'length' "${al_json}")"
+    read -r sc_count al_count < <(_report static \
+        "files=$(( ${#scripts[@]} + ${#pyfiles[@]} ))" \
+        "syntax=${syntax}" \
+        "shellcheck=${CI_REPORT_DIR}/shellcheck.json" \
+        "actionlint=${CI_REPORT_DIR}/actionlint.json" \
+        "shellcheck_version=$(shellcheck --version | awk '/version:/ {print $2}')" \
+        "actionlint_version=${ACTIONLINT_VERSION}")
 
-    jq -r '.[] | "  [X] \(.file):\(.line):\(.column) SC\(.code) (\(.level)) \(.message)"' "${sc_json}"
-    jq -r '.[] | "  [X] \(.filepath):\(.line):\(.column) [\(.kind)] \(.message)"' "${al_json}"
-
-    _static_report "${#scripts[@]}" "${syntax}" "${sc_count}" "${al_count}"
-
-    [ "${syntax}" -eq 0 ] || _error "${syntax} script(s) failed the syntax check"
+    [ "${syntax}" -eq 0 ] || _error "${syntax} file(s) failed the syntax check"
     [ "${sc_count}" -eq 0 ] || _error "shellcheck reported ${sc_count} finding(s) at warning or above"
     [ "${al_count}" -eq 0 ] || _error "actionlint reported ${al_count} finding(s)"
 
@@ -390,7 +403,7 @@ do_print_version() {
 # anything else at HIGH or CRITICAL fails here, before the publish job (#10).
 do_scan_image() {
     _stage_begin "Scan linux/$(_ci_arch)"
-    _require_cmd trivy jq
+    _require_cmd trivy python3
     local archive report blocking suppressed arch
     arch="$(_ci_arch)"
     archive="$(_ci_image_archive)"
@@ -427,29 +440,17 @@ do_scan_image() {
         --output "${CI_REPORT_DIR}/trivy-${arch}.sarif" "${report}"
     cp "${report}" "${CI_REPORT_DIR}/trivy-${arch}.json"
 
-    _info "packages scanned: $(jq '[.Results[]?.Packages[]?] | length' "${report}")"
-
-    # Suppressed entries nest the vulnerability under .Finding; reading
-    # .Severity at the top level matches nothing and reports every run clean.
-    suppressed="$(jq '[.Results[]?.ExperimentalModifiedFindings[]?
-        | select(.Finding.Severity == "HIGH" or .Finding.Severity == "CRITICAL")] | length' "${report}")"
-    blocking="$(jq '[.Results[]?.Vulnerabilities[]?
-        | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' "${report}")"
+    read -r blocking suppressed < <(_report scan \
+        "arch=${arch}" \
+        "json=${report}" \
+        "image=$(_ci_image_version)" \
+        "trivy_version=$(trivy --version | awk 'NR==1 {print $2}')" \
+        "severity=${SCAN_SEVERITY}" \
+        "expiry=${SCAN_EXCEPTION_EXPIRY}")
 
     if [ "${suppressed}" -gt 0 ]; then
         _warn "${suppressed} accepted ${SCAN_SEVERITY} finding(s) in $(_ci_image_version); see docs/security-risk-acceptance.md"
-        jq -r '.Results[]?.ExperimentalModifiedFindings[]?
-            | select(.Finding.Severity == "HIGH" or .Finding.Severity == "CRITICAL")
-            | "  accepted  \(.Finding.Severity)  \(.Finding.VulnerabilityID)  \(.Finding.PkgName) \(.Finding.InstalledVersion)  (\(.Status))"' "${report}"
     fi
-
-    if [ "${blocking}" -gt 0 ]; then
-        jq -r '.Results[]?.Vulnerabilities[]?
-            | select(.Severity == "HIGH" or .Severity == "CRITICAL")
-            | "  BLOCKING  \(.Severity)  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion)  fixed in: \(.FixedVersion // "no fix")"' "${report}"
-    fi
-
-    _scan_report "${arch}" "${report}" "${blocking}" "${suppressed}"
 
     if [ "${blocking}" -gt 0 ]; then
         _error "${blocking} unapproved ${SCAN_SEVERITY} finding(s). Fix them, or record an expiring exception in .trivyignore.yaml with the reasoning in docs/security-risk-acceptance.md"
@@ -498,7 +499,13 @@ do_k8s_e2e() {
         "${ROOT_DIR}/scripts/smoke-test.sh" || smoke_rc=$?
     CHECK_REPORT="${zdd}" "${ROOT_DIR}/scripts/verify-zdd.sh" || zdd_rc=$?
 
-    _e2e_report "${arch}" "${smoke}" "${smoke_rc}" "${zdd}" "${zdd_rc}"
+    _report e2e \
+        "arch=${arch}" \
+        "image=$(_ci_image_version)" \
+        "kubernetes=${KUBECTL_VERSION}" \
+        "kind=${KIND_VERSION}" \
+        "smoke=${smoke}" "smoke_rc=${smoke_rc}" \
+        "zdd=${zdd}" "zdd_rc=${zdd_rc}"
 
     [ "${smoke_rc}" -eq 0 ] && [ "${zdd_rc}" -eq 0 ] \
         || _error "the Kubernetes suite failed on linux/${arch}"
@@ -547,9 +554,9 @@ do_publish_image() {
     if published_revision="$(_published_revision_of "${ref}")"; then
         if [ "${published_revision}" = "$(_ci_commit_sha)" ]; then
             _warn "${ref} is already published for this commit; leaving it alone"
-            _publish_report "${ref}" \
-                "$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
-                "${published_revision}"
+            _report publish "ref=${ref}" \
+                "digest=$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
+                "revision=${published_revision}"
             _stage_end
             return 0
         fi
@@ -573,9 +580,9 @@ do_publish_image() {
     _info "assembling the multi-architecture manifest for ${ref}"
     docker buildx imagetools create --tag "${ref}" "${arch_refs[@]}"
 
-    _publish_report "${ref}" \
-        "$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
-        "$(_ci_commit_sha)"
+    _report publish "ref=${ref}" \
+        "digest=$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')" \
+        "revision=$(_ci_commit_sha)"
 
     _info "published ${ref}"
     _stage_end
@@ -639,7 +646,7 @@ do_verify_published() {
         fi
     done
 
-    _verify_report "${ref}" "$(_ci_commit_sha)" "${failures}"
+    _report verify "ref=${ref}" "revision=$(_ci_commit_sha)" "failures=${failures}"
 
     [ "${failures}" -eq 0 ] || _error "${failures} check(s) failed for ${ref}"
 

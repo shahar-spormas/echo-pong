@@ -30,6 +30,9 @@ TRIVY_ARCHIVE_amd64="Linux-64bit"
 TRIVY_ARCHIVE_arm64="Linux-ARM64"
 
 SCAN_SEVERITY="HIGH,CRITICAL"
+# Matches expired_at in .trivyignore.yaml; shown in the report so the deadline
+# is visible without opening the file.
+SCAN_EXCEPTION_EXPIRY="2026-09-07"
 
 CLUSTER_NAME="echo-pong-k8s"
 
