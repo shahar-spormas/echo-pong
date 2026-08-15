@@ -70,11 +70,47 @@ Take this application to production with support for both **x86** and **ARM64** 
 
 **Prerequisites:**
 - Docker
-- Minikube or Kind
-- Kubernetes 1.30 or newer — the Deployment uses `lifecycle.preStop.sleep`, which older kubelets ignore silently. See `docs/deployment-design.md`.
+- Kind (the cluster is defined in `kind/cluster.yaml`; Minikube needs its own ingress setup)
+- Kubernetes 1.30 to 1.35. The floor is `lifecycle.preStop.sleep`, which older kubelets ignore silently. The ceiling is the ingress controller, not this application. Both are explained in `docs/deployment-design.md` and `docs/exposure-design.md`.
 - kubectl
 - Go 1.24 (there are CVEs that are not fixed in that version, will consider them as accepted)
 - GitHub account
+- Host ports 80 and 443 free, so the ingress is reachable at `http://localhost`
+
+---
+
+## ⚡ Local quickstart
+
+```bash
+./scripts/cluster-up.sh     # Kind + Calico + ingress-nginx, every version pinned
+./scripts/smoke-test.sh     # deploys, then asserts exposure, auth, config and policy
+./scripts/verify-zdd.sh     # asserts availability across a rolling update
+```
+
+`cluster-up.sh` is idempotent and reuses an existing cluster; `RECREATE=1` rebuilds
+it from scratch. `smoke-test.sh` generates a throwaway token into the gitignored
+`secrets/` on first run, so no credential is needed to try this.
+
+Reaching it by hand, noting the Ingress is host-based:
+
+```bash
+curl -H 'Host: ping-pong.local' http://localhost/health
+curl -H 'Host: ping-pong.local' -H "Authorization: Bearer $(cat secrets/token)" \
+  http://localhost/ping
+```
+
+To run the container without Kubernetes, `./scripts/build.sh && ./scripts/run.sh`.
+
+---
+
+## 📐 Design notes
+
+Each document states a decision, the evidence for it, and what it does not cover.
+
+- `docs/deployment-design.md` — zero-downtime rollouts: probes, the `preStop` hook, and the disruption budget
+- `docs/exposure-design.md` — Service, Ingress, the NetworkPolicy, and why the ingress controller is a retired project
+- `docs/runtime-config.md` — ConfigMap and Secret wiring, and the couplings that span files
+- `docs/security-risk-acceptance.md` — the Go 1.24 standard library CVEs, and why they are accepted
 
 ---
 

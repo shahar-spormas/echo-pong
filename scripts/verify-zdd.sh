@@ -9,10 +9,15 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-default}"
 DEPLOYMENT="${DEPLOYMENT:-ping-pong}"
-SERVICE="${SERVICE:-ping-pong}"
 SELECTOR="${SELECTOR:-app.kubernetes.io/name=ping-pong}"
 PROBE_POD="${PROBE_POD:-zdd-probe}"
 PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
+# Check 4 probes through the ingress controller rather than straight at the
+# Service. k8s/networkpolicy.yaml now permits only the ingress-nginx namespace
+# to reach the pods, so a probe pod in this namespace is blocked by design.
+INGRESS_NS="${INGRESS_NS:-ingress-nginx}"
+INGRESS_SVC="${INGRESS_SVC:-ingress-nginx-controller}"
+INGRESS_HOSTNAME="${INGRESS_HOSTNAME:-ping-pong.local}"
 # The hook sleeps 10s. Anything at or above this proves it ran; a hook that
 # silently failed returns in about 1s.
 MIN_DRAIN_SECONDS="${MIN_DRAIN_SECONDS:-8}"
@@ -34,7 +39,7 @@ trap cleanup EXIT
 
 if ! kubectl -n "$NAMESPACE" get deploy "$DEPLOYMENT" >/dev/null 2>&1; then
   echo "Deployment $DEPLOYMENT not found in namespace $NAMESPACE." >&2
-  echo "Apply k8s/ first. Note the pod needs the Secret from issue #5 to start." >&2
+  echo "Run ./scripts/smoke-test.sh first; it creates the Secret and applies k8s/." >&2
   exit 1
 fi
 
@@ -109,18 +114,19 @@ fi
 
 echo
 echo "4. Does traffic survive a rollout?"
-if ! kubectl -n "$NAMESPACE" get svc "$SERVICE" >/dev/null 2>&1; then
+if ! kubectl -n "$INGRESS_NS" get svc "$INGRESS_SVC" >/dev/null 2>&1; then
   # A port-forward is not a substitute. It connects straight to one pod and
   # never consults EndpointSlices or kube-proxy, so it cannot exercise the
   # endpoint-removal race that the preStop hook exists to mitigate.
-  skip "Service $SERVICE not found; this check needs the Service from issue #4"
+  skip "Service $INGRESS_SVC not found in $INGRESS_NS; run ./scripts/cluster-up.sh"
 else
   kubectl -n "$NAMESPACE" delete pod "$PROBE_POD" --ignore-not-found >/dev/null 2>&1
   kubectl -n "$NAMESPACE" run "$PROBE_POD" \
     --image="$PROBE_IMAGE" --restart=Never --command -- \
     sh -c "while true; do
              code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
-                     http://${SERVICE}.${NAMESPACE}.svc.cluster.local/health || true)
+                     -H 'Host: ${INGRESS_HOSTNAME}' \
+                     http://${INGRESS_SVC}.${INGRESS_NS}.svc.cluster.local/health || true)
              echo \"\${code:-000}\"
              sleep 0.2
            done" >/dev/null
