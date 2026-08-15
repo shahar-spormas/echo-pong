@@ -1,7 +1,12 @@
 name: CI
 
-# Orchestration only. What each step does lives in .ci/ci_jobs.sh, so the
-# pipeline can be read, linted and run without pushing a commit to find out.
+# Orchestration only; the steps live in .ci/ci_jobs.sh so they can be read,
+# linted and run without pushing a commit to find out.
+#
+# Actions are referenced by release tag, not commit SHA. A tag is mutable, so
+# this is a readability trade: the ones used here are all first-party
+# actions/*, and the tools that decide what actually gets tested and shipped
+# are pinned in .ci/consts.sh instead.
 
 on:
   pull_request:
@@ -27,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
       - run: ./.ci/ci_jobs.sh do_static_checks
 
   platform:
@@ -49,7 +54,7 @@ jobs:
     env:
       CI_ARCH: ${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
 
       - name: Install pinned tools
         run: ./.ci/ci_jobs.sh do_setup_tools
