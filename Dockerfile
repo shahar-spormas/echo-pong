@@ -19,11 +19,13 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # optional labels, could be used for monitoring, logging, etc.
 ARG VERSION=dev
 ARG REVISION=unknown
+
 LABEL org.opencontainers.image.title="ping-pong-game" \
       org.opencontainers.image.description="Ping-pong HTTP server and CLI" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.revision="$REVISION" \
-      org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot"
+      org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot" \
+      org.opencontainers.image.source="https://github.com/shahar-spormas/echo-pong"
 
 COPY --from=builder /out/ping-pong-app /usr/local/bin/ping-pong-app
 
