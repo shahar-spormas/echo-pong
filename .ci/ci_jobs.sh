@@ -126,6 +126,10 @@ _ci_image_archive() {
     echo "${CI_ARTIFACT_DIR}/image-$(_ci_arch).tar"
 }
 
+_ci_binary() {
+    echo "${CI_ARTIFACT_DIR}/${BINARY_NAME}-linux-$(_ci_arch)"
+}
+
 _ci_scan_report() {
     echo "${CI_ARTIFACT_DIR}/trivy-$(_ci_arch).json"
 }
@@ -428,6 +432,28 @@ do_print_version() {
     _ci_image_version
 }
 
+# Lifted out of the image rather than compiled again, so what a developer
+# downloads is the executable that was scanned and cluster-tested, not another
+# build of the same source. docker create makes no attempt to run it, which
+# matters for a distroless image with no shell.
+do_extract_binary() {
+    _stage_begin "Extract binary linux/$(_ci_arch)"
+    _require_cmd docker
+    local ref binary container
+    ref="$(_ci_image_ref)"
+    binary="$(_ci_binary)"
+
+    mkdir -p "${CI_ARTIFACT_DIR}"
+    container="$(docker create --platform "linux/$(_ci_arch)" "${ref}")"
+    docker cp "${container}:${BINARY_PATH}" "${binary}" >/dev/null
+    docker rm "${container}" >/dev/null
+    chmod +x "${binary}"
+
+    _info "binary  ${binary} ($(wc -c < "${binary}" | tr -d ' ') bytes)"
+    _info "sha256  $(sha256sum "${binary}" | cut -d' ' -f1)"
+    _stage_end
+}
+
 # The matrix as JSON, so ci.yml holds no copy of the architecture list.
 do_print_matrix() {
     local arch runner entries=""
@@ -712,29 +738,74 @@ do_verify_published() {
 # runs, so it creates nothing that has not been checked.
 do_github_release() {
     _stage_begin "GitHub Release"
-    _require_cmd gh
-    local tag ref
+    _require_cmd gh sha256sum
+    local tag ref arch assets=() rows=()
     tag="${CI_RELEASE_TAG:-}"
     [ -n "${tag}" ] || _error "CI_RELEASE_TAG is not set; this job only runs for a tag"
     ref="$(_ci_image_ref)"
 
+    for arch in ${CI_ARCHES}; do
+        local binary="${CI_ARTIFACT_DIR}/${BINARY_NAME}-linux-${arch}"
+        [ -f "${binary}" ] || _error "no binary for ${arch} at ${binary}"
+        chmod +x "${binary}"
+        assets+=("${binary}")
+        rows+=("row=PASS|Binary|\`${BINARY_NAME}-linux-${arch}\`")
+    done
+
+    # One checksum file over all of them, so a download can be verified without
+    # trusting the page it came from.
+    ( cd "${CI_ARTIFACT_DIR}" && sha256sum "${BINARY_NAME}"-linux-* > SHA256SUMS )
+    assets+=("${CI_ARTIFACT_DIR}/SHA256SUMS")
+    _info "assets:"
+    cat "${CI_ARTIFACT_DIR}/SHA256SUMS"
+
     if gh release view "${tag}" >/dev/null 2>&1; then
-        _warn "release ${tag} already exists; leaving it alone"
+        _warn "release ${tag} already exists; replacing its assets"
+        gh release upload "${tag}" "${assets[@]}" --clobber
     else
         # --verify-tag so a typo cannot create a release against a tag that is
         # not in the remote. --notes is prepended to the generated notes.
-        gh release create "${tag}" \
+        gh release create "${tag}" "${assets[@]}" \
             --verify-tag \
             --generate-notes \
-            --notes "$(printf 'Container image:\n\n    docker pull %s\n' "${ref}")"
+            --notes "$(_release_notes "${ref}")"
         _info "created release ${tag}"
     fi
 
     report table name=release.md title="GitHub Release" \
         "headers=|Item|Value" \
         "row=PASS|Release|\`${tag}\`" \
-        "row=PASS|Image|\`${ref}\`"
+        "row=PASS|Image|\`${ref}\`" \
+        "${rows[@]}"
     _stage_end
+}
+
+_release_notes() {
+    local ref="$1"
+    cat <<EOF
+### Container
+
+    docker pull ${ref}
+
+One tag, both architectures; the registry serves the one you ask for.
+
+### Binary
+
+Lifted from that image, so it is the executable that was scanned and tested.
+Linux, \`amd64\` and \`arm64\`.
+
+    curl -LO https://github.com/shahar-spormas/echo-pong/releases/download/${CI_RELEASE_TAG}/${BINARY_NAME}-linux-amd64
+    curl -LO https://github.com/shahar-spormas/echo-pong/releases/download/${CI_RELEASE_TAG}/SHA256SUMS
+    sha256sum -c SHA256SUMS --ignore-missing
+    chmod +x ${BINARY_NAME}-linux-amd64
+
+Both modes read the secret from a file named by \`SECRET_FILE_PATH\`; in CLI
+mode \`--password\` is the value checked against it.
+
+    echo -n mysecret > token
+    SECRET_FILE_PATH=./token ./${BINARY_NAME}-linux-amd64 --mode=cli --password=mysecret ping
+    SECRET_FILE_PATH=./token ./${BINARY_NAME}-linux-amd64 --mode=server
+EOF
 }
 
 # Best effort: the cluster may not exist, which is part of the answer.

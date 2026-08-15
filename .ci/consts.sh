@@ -40,5 +40,9 @@ CI_RUNNER_arm64="ubuntu-24.04-arm"
 
 CLUSTER_NAME="echo-pong-k8s"
 
+# The executable inside the image, which is also what a release attaches.
+BINARY_NAME="ping-pong-app"
+BINARY_PATH="/usr/local/bin/${BINARY_NAME}"
+
 REGISTRY="${REGISTRY_OVERRIDE:-ghcr.io}"
 IMAGE_NAME="${REGISTRY}/shahar-spormas/echo-pong"
