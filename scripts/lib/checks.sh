@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Reporting shared by scripts/smoke-test.sh and scripts/verify-zdd.sh.
 #
-# Markers are [V], [X] and [-] rather than words or emoji: they line up in a
-# column, so a failure is findable by eye in a few hundred lines of log.
+# Console gets [V], [X], [-] in a fixed column, so a failure is findable by eye.
+# Set CHECK_REPORT and the same results are written as TAP 14
+# (https://testanything.org) for CI to render and keep.
 #
-# Set CHECK_REPORT to a path and every result is also appended as
-# "STATUS<tab>SECTION<tab>MESSAGE". CI renders that into the run summary and
-# keeps it as an artifact; locally it stays unset and nothing is written.
+# TAP because it already has all of it: ok/not ok, a SKIP directive, subtests
+# for sections, and a closing 1..N plan. The plan is the point: a script killed
+# part way writes fewer results than it promised, and that mismatch is what
+# says the run was truncated.
 
 CHECK_PASS=0
 CHECK_FAIL=0
 CHECK_SKIP=0
-CHECK_SECTION="preflight"
+CHECK_TOTAL=0
 CHECK_WIDTH="${CHECK_WIDTH:-74}"
 CHECK_REPORT="${CHECK_REPORT:-}"
 
@@ -21,7 +23,12 @@ _check_fill() {
   printf '%*s' "$count" '' | tr ' ' "$char"
 }
 
-# The banner a script opens with: what ran, and against what.
+_tap() {
+  [[ -n "$CHECK_REPORT" ]] || return 0
+  printf '%s\n' "$*" >> "$CHECK_REPORT"
+}
+
+# What ran, and against what.
 check_title() {
   echo
   _check_fill '=' "$CHECK_WIDTH"
@@ -29,49 +36,56 @@ check_title() {
   printf ' %s\n' "$*"
   _check_fill '=' "$CHECK_WIDTH"
   echo
+
+  _tap "TAP version 14"
+  _tap "# $*"
 }
 
 check_section() {
-  CHECK_SECTION="$*"
   local label=" -- $* "
   echo
   printf '%s' "$label"
   _check_fill '-' $(( CHECK_WIDTH - ${#label} ))
   echo
-}
 
-_check_record() {
-  [[ -n "$CHECK_REPORT" ]] || return 0
-  printf '%s\t%s\t%s\n' "$1" "$CHECK_SECTION" "$2" >> "$CHECK_REPORT"
+  _tap "# Subtest: $*"
 }
 
 pass() {
   printf ' [V] %s\n' "$*"
   CHECK_PASS=$((CHECK_PASS + 1))
-  _check_record PASS "$*"
+  CHECK_TOTAL=$((CHECK_TOTAL + 1))
+  _tap "ok ${CHECK_TOTAL} - $*"
 }
 
 fail() {
   printf ' [X] %s\n' "$*"
   CHECK_FAIL=$((CHECK_FAIL + 1))
-  _check_record FAIL "$*"
+  CHECK_TOTAL=$((CHECK_TOTAL + 1))
+  _tap "not ok ${CHECK_TOTAL} - $*"
 }
 
+# Counted, not a failure. TAP has a directive for it.
 skip() {
   printf ' [-] %s\n' "$*"
   CHECK_SKIP=$((CHECK_SKIP + 1))
-  _check_record SKIP "$*"
+  CHECK_TOTAL=$((CHECK_TOTAL + 1))
+  _tap "ok ${CHECK_TOTAL} - $* # SKIP"
 }
 
-# Context, not a result: indented under whatever it follows and never counted.
+# Context, not a result: never counted.
 info() {
   printf '     %s\n' "$*"
+  _tap "# $*"
 }
 
-# Last thing a script runs, so its exit status is the script's.
+# Last thing a script runs, so its status is the script's. The plan is written
+# only here, which is what makes its absence meaningful.
 check_summary() {
   local verdict="PASS"
   [[ "$CHECK_FAIL" -gt 0 ]] && verdict="FAIL"
+
+  _tap "1..${CHECK_TOTAL}"
 
   echo
   _check_fill '=' "$CHECK_WIDTH"

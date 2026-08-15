@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # read by .ci/ci_jobs.sh, which sources this file
 #
-# Versions for everything the pipeline runs. The runner image is not the source
-# of truth: GitHub ships kind and kubectl and bumps them on its own schedule.
+# Versions the pipeline pins, because the runner image is not the source of
+# truth: GitHub bumps kind and kubectl on its own schedule.
 #
-# kind and kubectl also carry checksums, because they decide which Kubernetes
-# version the tests run against and a release asset can be re-uploaded under the
-# same tag. trivy and actionlint only report, and the installer checks their
-# version after unpacking.
+# Those two also carry checksums, since they decide the Kubernetes version under
+# test and a release asset can be re-uploaded under the same tag. trivy and
+# actionlint only report, so their version is checked after unpacking instead.
 #
 # Refreshing a checksum:
-#   kind    https://github.com/kubernetes-sigs/kind/releases/download/<ver>/kind-linux-<arch>.sha256sum
+#   kind    .../releases/download/<ver>/kind-linux-<arch>.sha256sum
 #   kubectl https://dl.k8s.io/release/<ver>/bin/linux/<arch>/kubectl.sha256
 
-# kubectl tracks the node image in kind/cluster.yaml, not the newest release.
+# Tracks the node image in kind/cluster.yaml, not the newest release.
 KIND_VERSION="v0.32.0"
 KUBECTL_VERSION="v1.35.5"
 TRIVY_VERSION="0.74.0"
@@ -25,14 +24,19 @@ KIND_SHA256_arm64="b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900
 KUBECTL_SHA256_amd64="90f75ea6ecc9ea5633262e1c0b83a40560003b30fc94a04cb099404fcef0c224"
 KUBECTL_SHA256_arm64="ac69e06fd6860d69786692f5af1c3a1208ed54f8366a4d97ab15c172e99765ee"
 
-# Trivy names its archives after the platform, not the GOARCH used elsewhere.
+# Trivy names archives after the platform, not the GOARCH used elsewhere.
 TRIVY_ARCHIVE_amd64="Linux-64bit"
 TRIVY_ARCHIVE_arm64="Linux-ARM64"
 
 SCAN_SEVERITY="HIGH,CRITICAL"
-# Matches expired_at in .trivyignore.yaml; shown in the report so the deadline
-# is visible without opening the file.
+# Mirrors expired_at in .trivyignore.yaml, so the report shows the deadline.
 SCAN_EXCEPTION_EXPIRY="2026-09-07"
+
+# The only list of architectures. The workflow matrix, the publish loop and the
+# verification all derive from it; adding one means this line and a runner.
+CI_ARCHES="amd64 arm64"
+CI_RUNNER_amd64="ubuntu-24.04"
+CI_RUNNER_arm64="ubuntu-24.04-arm"
 
 CLUSTER_NAME="echo-pong-k8s"
 

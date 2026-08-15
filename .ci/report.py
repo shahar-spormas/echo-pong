@@ -3,18 +3,16 @@
 
     report.py <stage> out=<dir> key=value ...
 
-Every stage produces the same document: a title, a verdict, and a list of
-blocks. render() knows how to write those; a builder only decides what they
-contain. Adding a stage is one function and one line in BUILDERS, with no
-argument declarations, because arguments arrive as key=value pairs.
+Every stage is the same document: title, verdict, list of blocks. render()
+writes those; a builder only says what they contain. `table` takes its rows on
+the command line, so a stage needs code here only to read a foreign format,
+which is why the two builders are Trivy JSON and the check scripts' TAP.
 
-Counts go to stdout and detail to stderr, so a caller can read the numbers
-while the detail lands in the log:
+Counts go to stdout, detail to stderr:
 
     read -r blocking suppressed < <(report.py scan out=... json=...)
 """
 
-import csv
 import json
 import os
 import sys
@@ -31,7 +29,7 @@ def mark(status):
 
 
 def cell(value):
-    """A pipe in a message would otherwise split the table cell."""
+    """A pipe would otherwise split the table cell."""
     return str(value).replace("|", "\\|")
 
 
@@ -90,30 +88,25 @@ def write(directory, name, body):
 # ---------------------------------------------------------------------------
 
 
-def build_static(o):
-    shellcheck = load_json(o["shellcheck"])
-    actionlint = load_json(o["actionlint"])
-    syntax = int(o["syntax"])
+# The default, for stages with nothing to parse:
+#
+#   report.py table out=DIR name=publish.md title=Publish \
+#       headers='|Item|Value' row='PASS|Tag|`x`'
+#
+# The verdict defaults to the worst row, so a heading cannot contradict them.
+def build_table(o):
+    rows, statuses = [], []
+    for spec in o["row"]:
+        status, *cells = spec.split("|")
+        statuses.append(status)
+        rows.append([mark(status)] + cells)
 
-    for f in shellcheck:
-        note(f"  [X] {f['file']}:{f['line']}:{f['column']} SC{f['code']} ({f['level']}) {f['message']}")
-    for f in actionlint:
-        note(f"  [X] {f['filepath']}:{f['line']}:{f['column']} [{f['kind']}] {f['message']}")
+    verdict = o.get("verdict") or ("FAIL" if "FAIL" in statuses else "PASS")
+    blocks = [("table", (o.get("headers", "|Item|Value").split("|"), rows))]
+    if o.get("note"):
+        blocks.append(("text", o["note"]))
 
-    return {
-        "name": "static-checks.md",
-        "title": "Static checks",
-        "verdict": "PASS" if not (syntax or shellcheck or actionlint) else "FAIL",
-        "counts": [len(shellcheck), len(actionlint)],
-        "blocks": [
-            ("table", (["", "Check", "Findings"], [
-                [mark(syntax == 0), f"syntax check on {o['files']} file(s)", syntax],
-                [mark(not shellcheck), f"shellcheck {o['shellcheck_version']}, warning and above", len(shellcheck)],
-                [mark(not actionlint), f"actionlint {o['actionlint_version']}", len(actionlint)],
-            ])),
-            ("text", "Reports: `shellcheck.json`, `actionlint.json`"),
-        ],
-    }
+    return {"name": o["name"], "title": o["title"], "verdict": verdict, "blocks": blocks}
 
 
 def build_scan(o):
@@ -125,8 +118,7 @@ def build_scan(o):
     for result in data.get("Results") or []:
         packages += len(result.get("Packages") or [])
         blocking += [v for v in result.get("Vulnerabilities") or [] if v.get("Severity") in wanted]
-        # A suppressed entry wraps the vulnerability in .Finding and records
-        # why it was let through alongside it.
+        # Suppressed entries nest the vulnerability under .Finding.
         accepted += [e for e in result.get("ExperimentalModifiedFindings") or []
                      if e.get("Finding", {}).get("Severity") in wanted]
 
@@ -175,32 +167,53 @@ def build_scan(o):
     }
 
 
-def build_e2e(o):
-    # scripts/lib/checks.sh records STATUS<tab>SECTION<tab>MESSAGE.
-    def results(path):
-        if not Path(path).exists():
-            return []
-        with open(path, newline="") as handle:
-            return [r for r in csv.reader(handle, delimiter="\t") if len(r) == 3]
+def read_tap(path):
+    """A TAP 14 stream as (results, plan); plan is None if never written.
 
+    Only the subset scripts/lib/checks.sh emits: test points, `# Subtest:`
+    headers, and the closing plan that says the producer reached the end.
+    """
+    results, plan, section = [], None, ""
+    if not Path(path).exists():
+        return results, plan
+
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if line.startswith("# Subtest:"):
+            section = line[len("# Subtest:"):].strip()
+        elif line.startswith("1.."):
+            plan = int(line[3:] or 0)
+        elif line.startswith(("ok ", "not ok ")):
+            ok = not line.startswith("not ok")
+            description = line.split(" - ", 1)[1] if " - " in line else line
+            skipped = "# SKIP" in description
+            description = description.replace("# SKIP", "").strip()
+            results.append(("SKIP" if skipped else "PASS" if ok else "FAIL",
+                            section, description))
+
+    return results, plan
+
+
+def build_e2e(o):
     blocks = [("text", f"Image `{o['image']}` on Kubernetes {o['kubernetes']}, kind {o['kind']}.")]
     failed = False
 
-    for title, path, rc in (("Smoke test", o["smoke"], int(o["smoke_rc"])),
-                            ("Zero-downtime", o["zdd"], int(o["zdd_rc"]))):
-        rows = results(path)
-        counts = {s: sum(1 for r in rows if r[0] == s) for s in ("PASS", "FAIL", "SKIP")}
-        table_rows = [[mark(status), section, message] for status, section, message in rows]
+    for title, path in (("Smoke test", o["smoke"]), ("Zero-downtime", o["zdd"])):
+        results, plan = read_tap(path)
+        counts = {s: sum(1 for r in results if r[0] == s) for s in ("PASS", "FAIL", "SKIP")}
+        rows = [[mark(status), section, description] for status, section, description in results]
 
-        # A script killed by a raw kubectl error records no failure of its own,
-        # so without this the report shows an empty table under a passing heading.
-        if rc != 0 and not counts["FAIL"]:
-            table_rows.append(["X", "—", f"script exited {rc} before reaching a check; see the log"])
-        failed = failed or rc != 0
+        # Written last, so a missing or short plan means a truncated run.
+        if plan is None:
+            rows.append(["X", "—", "no plan line: the script did not reach the end, see the log"])
+        elif plan != len(results):
+            rows.append(["X", "—", f"planned {plan} checks but recorded {len(results)}"])
+
+        failed = failed or counts["FAIL"] > 0 or plan != len(results)
 
         blocks.append(("text", f"### {title} — {counts['PASS']} passed, "
                                f"{counts['FAIL']} failed, {counts['SKIP']} skipped"))
-        blocks.append(("table", (["", "Section", "Check"], table_rows)))
+        blocks.append(("table", (["", "Section", "Check"], rows)))
 
     return {
         "name": f"e2e-{o['arch']}.md",
@@ -210,40 +223,26 @@ def build_e2e(o):
     }
 
 
-def build_publish(o):
-    return {
-        "name": "publish.md",
-        "title": "Publish",
-        "verdict": "PASS",
-        "blocks": [("table", (["", "Item", "Value"], [
-            [mark("PASS"), "Tag", f"`{o['ref']}`"],
-            [mark("PASS"), "Index digest", f"`{o['digest']}`"],
-            [mark("PASS"), "Revision", f"`{o['revision']}`"],
-            [mark("PASS"), "Platforms", "`linux/amd64`, `linux/arm64`"],
-        ]))],
-    }
-
-
-def build_verify(o):
-    status = "PASS" if int(o["failures"]) == 0 else "FAIL"
-    return {
-        "name": "verify-published.md",
-        "title": "Published image verified",
-        "verdict": status,
-        "blocks": [("table", (["", "Check"], [
-            [mark(status), f"`{o['ref']}` resolves for `linux/amd64` and `linux/arm64`"],
-            [mark(status), f"both platforms pull and report revision `{o['revision']}`"],
-        ]))],
-    }
-
-
 BUILDERS = {
-    "static": build_static,
+    "table": build_table,
+    # Only stages that read a foreign format need their own builder.
     "scan": build_scan,
     "e2e": build_e2e,
-    "publish": build_publish,
-    "verify": build_verify,
 }
+
+
+def parse_options(argv):
+    """key=value pairs, repeated keys collected into a list."""
+    options = {"row": []}
+    for arg in argv:
+        key, separator, value = arg.partition("=")
+        if not separator:
+            continue
+        if isinstance(options.get(key), list):
+            options[key].append(value)
+        else:
+            options[key] = value
+    return options
 
 
 def main():
@@ -251,10 +250,8 @@ def main():
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} "
                          f"<{'|'.join(BUILDERS)}> out=<dir> key=value ...")
 
-    stage = sys.argv[1]
-    options = dict(arg.split("=", 1) for arg in sys.argv[2:] if "=" in arg)
-
-    doc = BUILDERS[stage](options)
+    options = parse_options(sys.argv[2:])
+    doc = BUILDERS[sys.argv[1]](options)
     write(options["out"], doc["name"], render(doc))
 
     if doc.get("counts"):

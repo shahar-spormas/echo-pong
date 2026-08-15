@@ -32,9 +32,8 @@ PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
 ASSERT_REGISTRY_PULL="${ASSERT_REGISTRY_PULL:-0}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/}"
 
-# Names the image to test instead of the one in k8s/deployment.yaml, whose tag
-# is an already published release. CI points this at the build for the current
-# commit, so a run that failed to side-load cannot pull the old one and pass.
+# The image to test instead of the one in k8s/deployment.yaml, whose tag is a
+# published release a failed side-load would silently pass against.
 IMAGE_OVERRIDE="${IMAGE_OVERRIDE:-}"
 
 # shellcheck source=scripts/lib/checks.sh
@@ -112,8 +111,7 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-file=token="$SECRET_FILE" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-# Rendered to a temp directory rather than patched after applying, so there is
-# one rollout to wait on rather than two racing each other.
+# Rendered to a temp dir, not patched after applying: one rollout, not two.
 if [[ -n "$IMAGE_OVERRIDE" ]]; then
   RENDERED_DIR="$(mktemp -d)"
   cp "$ROOT_DIR"/k8s/*.yaml "$RENDERED_DIR/"

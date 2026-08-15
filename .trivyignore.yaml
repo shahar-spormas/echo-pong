@@ -1,15 +1,13 @@
 # The only HIGH/CRITICAL findings allowed to ship. Anything else fails the build.
 #
-# All of these are the Go 1.24 standard library, which the project prerequisites
-# pin. Go 1.24 is end of life and every fix landed in 1.25 or later, so there is
-# nothing to upgrade to; a static binary means the base image cannot fix it
-# either. Reasoning per advisory is in docs/security-risk-acceptance.md.
+# All are the Go 1.24 standard library, pinned by the project prerequisites.
+# 1.24 is end of life and every fix landed in 1.25 or later, so there is nothing
+# to upgrade to, and a static binary means the base image cannot fix it either.
+# Full reasoning in docs/security-risk-acceptance.md.
 #
-# Entries expire on 2026-09-07 so the decision gets made again, and each is
-# scoped by purl so it cannot suppress the same CVE in another package.
-#
-# "Reachable" means the request path actually reaches it; the rest are linked in
-# by net/http and never called.
+# Each is scoped by purl and expires 2026-09-07, so the decision gets made again.
+# "Reachable" means the request path reaches it; the rest are linked in by
+# net/http and never called.
 
 vulnerabilities:
   - id: CVE-2026-25679

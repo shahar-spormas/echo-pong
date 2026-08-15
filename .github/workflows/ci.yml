@@ -1,12 +1,11 @@
 name: CI
 
-# Orchestration only; the steps live in .ci/ci_jobs.sh so they can be read,
-# linted and run without pushing a commit to find out.
+# Orchestration only; the steps are in .ci/ci_jobs.sh, so they can be run and
+# linted without pushing a commit.
 #
-# Actions are referenced by release tag, not commit SHA. A tag is mutable, so
-# this is a readability trade: the ones used here are all first-party
-# actions/*, and the tools that decide what actually gets tested and shipped
-# are pinned in .ci/consts.sh instead.
+# Actions use release tags, not commit SHAs: a readability trade, since these
+# are all first-party actions/* and the tools that decide what gets tested and
+# shipped are pinned in .ci/consts.sh.
 
 on:
   pull_request:
@@ -22,7 +21,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # On a pull request this is the merge commit, which is what checkout gives us.
+  # On a pull request, the merge commit, which is what checkout gives us.
   CI_COMMIT_SHA: ${{ github.sha }}
 
 jobs:
@@ -30,10 +29,24 @@ jobs:
     name: Static checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # The linters diff against the base, absent in a shallow clone.
+          fetch-depth: 0
 
+      # Read from CI_ARCHES in .ci/consts.sh, so adding an architecture needs
+      # no change here and no copy of the list per job.
+      - name: Resolve the architecture matrix
+        id: matrix
+        run: echo "value=$(./.ci/ci_jobs.sh do_print_matrix)" >> "$GITHUB_OUTPUT"
+
+      # PRs lint their diff; a push to main leaves this unset and sweeps all.
       - name: Static checks
+        env:
+          CI_LINT_BASE: ${{ github.event.pull_request.base.sha }}
         run: ./.ci/ci_jobs.sh do_static_checks
 
       - name: Upload report
@@ -49,16 +62,10 @@ jobs:
     name: build (${{ matrix.arch }})
     needs: static-checks
     # Native runners, matched OS versions, so the processor is the only
-    # deliberate difference. A manifest listing two platforms is not evidence
-    # that either one boots.
+    # difference. A manifest listing two platforms is not evidence either boots.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
+      matrix: ${{ fromJSON(needs.static-checks.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     env:
@@ -69,8 +76,7 @@ jobs:
       - name: Build
         run: ./.ci/ci_jobs.sh do_build_image
 
-      # Everything downstream works from this tarball, so the image that gets
-      # scanned, tested and published is one build rather than three.
+      # Everything downstream works from this tarball: one build, not three.
       - name: Upload image
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -81,18 +87,12 @@ jobs:
 
   scan:
     name: scan (${{ matrix.arch }})
-    needs: build
-    # Both architectures find the same things, since the binary is static
-    # and the distroless base has no arch-specific packages. Kept as a matrix
-    # anyway: it scans what it publishes, and it runs alongside e2e so no added time.
+    needs: [static-checks, build]
+    # Both find the same things today: static binary, no arch-specific packages
+    # in the base. Kept a matrix anyway; it scans what it publishes, for free.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
+      matrix: ${{ fromJSON(needs.static-checks.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     env:
@@ -112,7 +112,7 @@ jobs:
       - name: Scan
         run: ./.ci/ci_jobs.sh do_scan_image
 
-      # Also on failure, which is when the report is worth reading.
+      # Also on failure, when the report is worth reading.
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v7.0.1
@@ -124,15 +124,10 @@ jobs:
 
   e2e:
     name: e2e (${{ matrix.arch }})
-    needs: build
+    needs: [static-checks, build]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
+      matrix: ${{ fromJSON(needs.static-checks.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
@@ -167,11 +162,11 @@ jobs:
 
   publish:
     name: Publish
-    # Both gates, both architectures. The scan is what keeps an unapproved
+    # Both gates, both architectures: this is what keeps an unapproved
     # HIGH or CRITICAL finding out of the registry.
     needs: [scan, e2e]
     # The only job that can write to the registry. github.repository stops a
-    # fork's own main from trying to publish here.
+    # fork's own main publishing here.
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
