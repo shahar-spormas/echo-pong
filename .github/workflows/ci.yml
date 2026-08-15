@@ -82,6 +82,9 @@ jobs:
   scan:
     name: scan (${{ matrix.arch }})
     needs: build
+    # Both architectures find the same things, since the binary is static
+    # and the distroless base has no arch-specific packages. Kept as a matrix
+    # anyway: it scans what it publishes, and it runs alongside e2e so no added time.
     strategy:
       fail-fast: false
       matrix:
