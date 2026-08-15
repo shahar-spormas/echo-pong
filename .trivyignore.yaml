@@ -1,0 +1,108 @@
+# The only HIGH/CRITICAL findings allowed to ship. Anything else fails the build.
+#
+# All of these are the Go 1.24 standard library, which the project prerequisites
+# pin. Go 1.24 is end of life and every fix landed in 1.25 or later, so there is
+# nothing to upgrade to; a static binary means the base image cannot fix it
+# either. Reasoning per advisory is in docs/security-risk-acceptance.md.
+#
+# Entries expire on 2026-09-07 so the decision gets made again, and each is
+# scoped by purl so it cannot suppress the same CVE in another package.
+#
+# "Reachable" means the request path actually reaches it; the rest are linked in
+# by net/http and never called.
+
+vulnerabilities:
+  - id: CVE-2026-25679
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: net/url IPv6 host literals. Reachable, every request URI is parsed.
+
+  - id: CVE-2026-27145
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: crypto/x509 DNS SAN processing. No certificate is verified.
+
+  - id: CVE-2026-32280
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: crypto/x509 chain building. No chain is ever built.
+
+  - id: CVE-2026-32281
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: crypto/x509 chain validation. No chain is ever validated.
+
+  - id: CVE-2026-32283
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: crypto/tls key update. The server is plain HTTP; no tls.Conn exists.
+
+  - id: CVE-2026-33811
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: net.LookupCNAME. The application resolves no names.
+
+  - id: CVE-2026-33814
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: HTTP/2 SETTINGS flood. h2c is not enabled; the ingress terminates HTTP/2.
+
+  - id: CVE-2026-33818
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: encoding/asn1 recursion. No ASN.1 is decoded.
+
+  - id: CVE-2026-39820
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: net/mail parsing. No mail is parsed.
+
+  - id: CVE-2026-39821
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: x/net/idna via net/http. No internationalised domain names are handled.
+
+  - id: CVE-2026-39822
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: os.Root symlink traversal. Only one known path is opened, without os.Root.
+
+  - id: CVE-2026-39836
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: NUL bytes in Dial and LookupPort, described as Windows-only. This runs Linux.
+
+  - id: CVE-2026-42499
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: net/mail address parsing. No mail is parsed.
+
+  - id: CVE-2026-42504
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: mime header parsing. Reachable through request headers.
+
+  - id: CVE-2026-56853
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: Unencrypted HTTP/2. h2c is not enabled; the ingress terminates HTTP/2.
+
+  - id: CVE-2026-56858
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: html/template XSS. No HTML template is rendered; responses are JSON.
+
+  - id: CVE-2026-56859
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: encoding/xml recursion. No XML is decoded.
+
+  - id: CVE-2026-56860
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: net/url quadratic path resolution. Reachable, behind the ingress.
+
+  - id: CVE-2026-56862
+    purls: ["pkg:golang/stdlib@v1.24.13"]
+    expired_at: 2026-09-07
+    statement: crypto/tls KeyUpdate. The server is plain HTTP; no tls.Conn exists.

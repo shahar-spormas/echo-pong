@@ -3,6 +3,12 @@ name: CI
 # Orchestration only; the steps live in .ci/ci_jobs.sh so they can be read,
 # linted and run without pushing a commit to find out.
 #
+#   static-checks
+#        |
+#      build (amd64, arm64)  ->  image tarball
+#        |            |
+#      scan          e2e            in parallel, both from that tarball
+#
 # Actions are referenced by release tag, not commit SHA. A tag is mutable, so
 # this is a readability trade: the ones used here are all first-party
 # actions/*, and the tools that decide what actually gets tested and shipped
@@ -22,8 +28,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # The commit every job builds and labels its image with. On a pull request
-  # this is the merge commit, which is also what actions/checkout checks out.
+  # On a pull request this is the merge commit, which is what checkout gives us.
   CI_COMMIT_SHA: ${{ github.sha }}
 
 jobs:
@@ -35,12 +40,83 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - run: ./.ci/ci_jobs.sh do_static_checks
 
-  platform:
-    name: ${{ matrix.arch }}
+  build:
+    name: build (${{ matrix.arch }})
     needs: static-checks
-    # Native runners on both architectures, matched OS versions so the only
-    # deliberate difference between the two legs is the processor. A manifest
-    # listing two platforms is not evidence that either one boots.
+    # Native runners, matched OS versions, so the processor is the only
+    # deliberate difference. A manifest listing two platforms is not evidence
+    # that either one boots.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      CI_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Build
+        run: ./.ci/ci_jobs.sh do_build_image
+
+      # Everything downstream works from this tarball, so the image that gets
+      # scanned, tested and published is one build rather than three.
+      - name: Upload image
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: image-${{ matrix.arch }}
+          path: .ci-artifacts/image-${{ matrix.arch }}.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  scan:
+    name: scan (${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      CI_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install pinned tools
+        run: ./.ci/ci_jobs.sh do_setup_tools trivy
+
+      - name: Download image
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: image-${{ matrix.arch }}
+          path: .ci-artifacts
+
+      - name: Scan
+        run: ./.ci/ci_jobs.sh do_scan_image
+
+      # Also on failure, which is when the report is worth reading.
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: scan-${{ matrix.arch }}
+          path: .ci-artifacts/trivy-${{ matrix.arch }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  e2e:
+    name: e2e (${{ matrix.arch }})
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -57,10 +133,13 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install pinned tools
-        run: ./.ci/ci_jobs.sh do_setup_tools
+        run: ./.ci/ci_jobs.sh do_setup_tools kind kubectl
 
-      - name: Build
-        run: ./.ci/ci_jobs.sh do_build_image
+      - name: Download image
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: image-${{ matrix.arch }}
+          path: .ci-artifacts
 
       - name: Kubernetes end-to-end
         run: ./.ci/ci_jobs.sh do_k8s_e2e

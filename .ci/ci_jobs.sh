@@ -13,7 +13,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=.ci/consts.sh
 . "${ROOT_DIR}/.ci/consts.sh"
 
-SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_k8s_e2e"
+SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_scan_image"
+SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_k8s_e2e"
 SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_print_version do_diagnostics"
 
 # Pinned tools go here rather than /usr/local/bin, so no job needs sudo.
@@ -99,6 +100,9 @@ _ci_image_archive() {
     echo "${CI_ARTIFACT_DIR}/image-$(_ci_arch).tar"
 }
 
+_ci_scan_report() {
+    echo "${CI_ARTIFACT_DIR}/trivy-$(_ci_arch).json"
+}
 
 # Only Linux builds are pinned, since that is all CI runs. A laptop brings its
 # own tools and is told they may not match.
@@ -189,6 +193,36 @@ _install_kubectl() {
     chmod +x "${CI_BIN_DIR}/kubectl"
 }
 
+_install_trivy() {
+    local arch="$1" current="" archive tmp installed
+
+    if command -v trivy >/dev/null 2>&1; then
+        current="$(trivy --version 2>/dev/null | awk 'NR==1 {print $2}' || true)"
+    fi
+
+    if _tool_is_pinned "${current}" "${TRIVY_VERSION}"; then
+        _info "trivy ${TRIVY_VERSION} already present"
+        return 0
+    fi
+
+    _require_pinned_or_local trivy "${TRIVY_VERSION}" && return 0
+
+    _info "installing trivy ${TRIVY_VERSION} (found '${current:-none}')"
+    archive="$(_consts_lookup "TRIVY_ARCHIVE_${arch}")"
+    tmp="$(mktemp -d)"
+    _fetch \
+        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${archive}.tar.gz" \
+        "${tmp}/trivy.tar.gz"
+    tar -xzf "${tmp}/trivy.tar.gz" -C "${tmp}" trivy
+    mv "${tmp}/trivy" "${CI_BIN_DIR}/trivy"
+    chmod +x "${CI_BIN_DIR}/trivy"
+    rm -rf "${tmp}"
+
+    installed="$(trivy --version | awk 'NR==1 {print $2}')"
+    _tool_is_pinned "${installed}" "${TRIVY_VERSION}" \
+        || _error "installed trivy reports ${installed}, expected ${TRIVY_VERSION}"
+}
+
 _install_actionlint() {
     local arch="$1" tmp installed
 
@@ -242,28 +276,28 @@ do_static_checks() {
     _info "static checks passed"
 }
 
+# Takes the tools to install, or installs all of them. Named, because the scan
+# and cluster jobs run in parallel and each needs a different half.
 do_setup_tools() {
-    _info "Stage: tool setup"
-    local arch
+    local arch tool tools
     arch="$(_ci_arch)"
+    tools="${*:-kind kubectl trivy}"
 
+    _info "Stage: tool setup for linux/${arch}: ${tools}"
     mkdir -p "${CI_BIN_DIR}"
-    _require_cmd curl sha256sum tar jq docker
+    _require_cmd curl sha256sum tar jq
 
-    _install_kind "${arch}"
-    _install_kubectl "${arch}"
-
-    # So a version question is answered by the log, not by a guess about the runner.
-    _info "docker       $(docker version --format '{{.Server.Version}}')"
-    _info "buildx       $(docker buildx version | awk '{print $2}')"
-    _info "kind         $(kind version -q)"
-    _info "kubectl      $(kubectl version --client -o json | jq -r .clientVersion.gitVersion)"
-    _info "architecture ${arch}"
+    for tool in ${tools}; do
+        case "${tool}" in
+            kind | kubectl | trivy | actionlint) "_install_${tool}" "${arch}" ;;
+            *) _error "unknown tool: ${tool}" ;;
+        esac
+    done
 }
 
 # Native, no QEMU: the Dockerfile cross-compiles from BUILDPLATFORM and each
-# runner builds for its own processor. The tarball is what the publish job
-# ships, so the registry gets the bytes that were tested, not a rebuild.
+# runner builds for its own processor. The tarball is what the scan and the
+# cluster test both work from, so they judge one build rather than three.
 do_build_image() {
     _info "Stage: build"
     _require_cmd docker
@@ -274,6 +308,7 @@ do_build_image() {
 
     mkdir -p "${CI_ARTIFACT_DIR}"
 
+    _info "docker $(docker version --format '{{.Server.Version}}'), buildx $(docker buildx version | awk '{print $2}')"
     _info "building ${ref} for linux/${arch}"
     # Attestations off: they wrap even a single-platform build in an index that
     # survives save and load only on a daemon with the containerd image store,
@@ -297,18 +332,81 @@ do_print_version() {
     _ci_image_version
 }
 
+# Scans the archive, so what is judged is what was built. Entries in
+# .trivyignore.yaml are reported and allowed through until they expire;
+# anything else at HIGH or CRITICAL fails the job (#10).
+do_scan_image() {
+    _info "Stage: scan"
+    _require_cmd trivy jq
+    local archive report blocking suppressed
+    archive="$(_ci_image_archive)"
+    report="$(_ci_scan_report)"
+
+    [ -f "${archive}" ] || _error "no image archive at ${archive}; run do_build_image first"
+    mkdir -p "${CI_ARTIFACT_DIR}"
+
+    # --exit-code 0 because the policy below needs the report to exist to apply
+    # it; trivy still exits non-zero if the scan or database itself failed, and
+    # that is deliberately not swallowed.
+    # No --ignore-unfixed: it reads as noise reduction and behaves as a blanket
+    # exemption for every unfixed finding, including ones nobody has read.
+    trivy image \
+        --input "${archive}" \
+        --scanners vuln \
+        --severity "${SCAN_SEVERITY}" \
+        --ignorefile "${ROOT_DIR}/.trivyignore.yaml" \
+        --show-suppressed \
+        --format json \
+        --output "${report}" \
+        --exit-code 0 \
+        --quiet || _error "trivy failed to scan ${archive}"
+
+    # Suppressed entries nest the vulnerability under .Finding; reading
+    # .Severity at the top level matches nothing and reports every run clean.
+    suppressed="$(jq '[.Results[]?.ExperimentalModifiedFindings[]?
+        | select(.Finding.Severity == "HIGH" or .Finding.Severity == "CRITICAL")] | length' "${report}")"
+    blocking="$(jq '[.Results[]?.Vulnerabilities[]?
+        | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' "${report}")"
+
+    if [ "${suppressed}" -gt 0 ]; then
+        _warn "${suppressed} accepted ${SCAN_SEVERITY} finding(s) in $(_ci_image_version); see docs/security-risk-acceptance.md"
+        jq -r '.Results[]?.ExperimentalModifiedFindings[]?
+            | select(.Finding.Severity == "HIGH" or .Finding.Severity == "CRITICAL")
+            | "  accepted  \(.Finding.Severity)  \(.Finding.VulnerabilityID)  \(.Finding.PkgName) \(.Finding.InstalledVersion)  (\(.Status))"' "${report}"
+    fi
+
+    if [ "${blocking}" -gt 0 ]; then
+        jq -r '.Results[]?.Vulnerabilities[]?
+            | select(.Severity == "HIGH" or .Severity == "CRITICAL")
+            | "  BLOCKING  \(.Severity)  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion)  fixed in: \(.FixedVersion // "no fix")"' "${report}"
+        _summary "- Scan **failed** on \`linux/$(_ci_arch)\`: ${blocking} unapproved finding(s)"
+        _error "${blocking} unapproved ${SCAN_SEVERITY} finding(s). Fix them, or record an expiring exception in .trivyignore.yaml with the reasoning in docs/security-risk-acceptance.md"
+    fi
+
+    _info "no unapproved ${SCAN_SEVERITY} findings (${suppressed} accepted)"
+    _summary "- Scan passed on \`linux/$(_ci_arch)\`: 0 unapproved, ${suppressed} accepted"
+}
+
 # The same scripts a developer runs locally, against the image this run built.
 do_k8s_e2e() {
     _info "Stage: Kubernetes end-to-end"
     _require_cmd docker kind kubectl
-    local ref
+    local ref archive
     ref="$(_ci_image_ref)"
+    archive="$(_ci_image_archive)"
+
+    [ -f "${archive}" ] || _error "no image archive at ${archive}; run do_build_image first"
 
     "${ROOT_DIR}/scripts/cluster-up.sh"
     _verify_cluster_version
 
+    # From the archive rather than the local image store, because this runs in
+    # parallel with the scan and neither job is the one that built the image.
+    # The tag travels inside the tarball.
     _info "side-loading ${ref} into kind"
-    kind load docker-image "${ref}" --name "${CLUSTER_NAME}"
+    kind load image-archive "${archive}" --name "${CLUSTER_NAME}"
+
+    _preload_probe_image
 
     # IMAGE_OVERRIDE names the image under test. The tag in k8s/deployment.yaml
     # is an already published release, so without this a run that failed to
@@ -317,6 +415,24 @@ do_k8s_e2e() {
     "${ROOT_DIR}/scripts/verify-zdd.sh"
 
     _summary "- Kubernetes end-to-end passed on \`linux/$(_ci_arch)\`"
+}
+
+# smoke-test.sh and verify-zdd.sh each run a curl pod, so the node would pull
+# the same Docker Hub image twice, and an anonymous pull is rate limited by IP.
+# Fetching it once here turns a 429 into one warning instead of two pods stuck
+# in ImagePullBackOff. Best effort: on failure the node pulls it as before.
+_preload_probe_image() {
+    local image="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
+
+    if docker image inspect "${image}" >/dev/null 2>&1 \
+        || docker pull --quiet "${image}" >/dev/null 2>&1; then
+        if kind load docker-image "${image}" --name "${CLUSTER_NAME}" >/dev/null 2>&1; then
+            _info "preloaded ${image}"
+            return 0
+        fi
+    fi
+
+    _warn "could not preload ${image}; the cluster will pull it itself"
 }
 
 # A pinned node image and a running cluster are different claims, and
