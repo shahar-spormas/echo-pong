@@ -22,13 +22,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/.ci/consts.sh"
 
 SUPPORTED_CI_JOBS="do_static_checks do_setup_tools do_build_image do_k8s_e2e"
-SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_diagnostics"
+SUPPORTED_CI_JOBS="${SUPPORTED_CI_JOBS} do_print_version do_diagnostics"
 
 # Pinned tools land here rather than /usr/local/bin, so a job never needs sudo
 # and the directory is the first thing on PATH for every later step.
 CI_BIN_DIR="${ROOT_DIR}/.ci/bin"
 PATH="${CI_BIN_DIR}:${PATH}"
 export PATH
+
+# Build outputs, before they become workflow artifacts.
+CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-${ROOT_DIR}/.ci-artifacts}"
+
+CI_IMAGE_NAME="${CI_IMAGE_NAME:-${IMAGE_NAME}}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,14 +80,42 @@ ci_arch() {
     esac
 }
 
-# The image reference is read out of the Deployment so this pipeline cannot
-# disagree with what actually gets deployed.
+# The full 40-character commit. GITHUB_SHA in a workflow, HEAD on a laptop.
+ci_commit_sha() {
+    if [ -n "${CI_COMMIT_SHA:-}" ]; then
+        echo "${CI_COMMIT_SHA}"
+    else
+        git -C "${ROOT_DIR}" rev-parse HEAD
+    fi
+}
+
+# Seven characters, sliced rather than asked of git: core.abbrev auto-scales
+# with the size of the repository, so `git rev-parse --short` is not guaranteed
+# to return the same width on two machines, and a tag has to be stable.
+ci_short_sha() {
+    local sha
+    sha="$(ci_commit_sha)"
+    echo "${sha:0:7}"
+}
+
+# v0.1.0-1a2b3c4. The base version is a file, so bumping it is a reviewable
+# one-line change; the commit suffix makes every build individually
+# addressable without pretending each one is a release. Issue #8 adds the
+# release tags on top of this.
+ci_image_version() {
+    local base
+    [ -f "${ROOT_DIR}/VERSION" ] || error "no VERSION file at ${ROOT_DIR}/VERSION"
+    base="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
+    [ -n "${base}" ] || error "VERSION is empty"
+    echo "v${base}-$(ci_short_sha)"
+}
+
 ci_image_ref() {
-    local ref
-    ref="$(awk '/^[[:space:]]+image:[[:space:]]/ {print $2; exit}' \
-        "${ROOT_DIR}/k8s/deployment.yaml")"
-    [ -n "${ref}" ] || error "no image: field found in k8s/deployment.yaml"
-    echo "${ref}"
+    echo "${CI_IMAGE_NAME}:$(ci_image_version)"
+}
+
+ci_image_archive() {
+    echo "${CI_ARTIFACT_DIR}/image-$(ci_arch).tar"
 }
 
 # Only Linux binaries are pinned, because that is the only thing CI runs on.
@@ -280,22 +313,46 @@ do_setup_tools() {
 # Builds this architecture natively. The Dockerfile already cross-compiles from
 # BUILDPLATFORM, so this needs no QEMU: each runner builds for the processor it
 # is running on.
+#
+# The result is kept twice: in the local image store for the Kind test, and as
+# a tarball, so whatever is published later is the same bytes that were tested
+# rather than a rebuild that merely started from the same source.
 do_build_image() {
     info "Stage: build"
-    require_cmd docker git
-    local ref arch
+    require_cmd docker
+    local ref arch archive
     ref="$(ci_image_ref)"
     arch="$(ci_arch)"
+    archive="$(ci_image_archive)"
+
+    mkdir -p "${CI_ARTIFACT_DIR}"
 
     info "building ${ref} for linux/${arch}"
+    # No provenance or SBOM attestations. With them, buildx wraps even a
+    # single-platform build in an index whose extra manifests refer to their
+    # subject by digest, and that survives save, load and push only on a daemon
+    # with the containerd image store: on a runner without it the build output
+    # is shaped differently, which is exactly the kind of difference that shows
+    # up for the first time in the publish job. They were decorative anyway,
+    # since nothing verifies them at admission.
     docker build \
         --platform "linux/${arch}" \
-        --build-arg VERSION="${ref##*:}" \
-        --build-arg REVISION="$(git -C "${ROOT_DIR}" rev-parse --short HEAD)" \
+        --provenance=false \
+        --sbom=false \
+        --build-arg VERSION="$(ci_image_version)" \
+        --build-arg REVISION="$(ci_commit_sha)" \
         --tag "${ref}" \
         "${ROOT_DIR}" || error "image build failed"
 
+    docker save --output "${archive}" "${ref}"
+    info "saved $(du -h "${archive}" | cut -f1) to ${archive}"
+
     summary "- Built \`${ref}\` for \`linux/${arch}\`"
+}
+
+# What this commit would be published as.
+do_print_version() {
+    ci_image_version
 }
 
 # The same scripts a developer runs locally, against the image this run built.
@@ -315,7 +372,11 @@ do_k8s_e2e() {
     info "side-loading ${ref} into kind"
     kind load docker-image "${ref}" --name "${CLUSTER_NAME}"
 
-    ASSERT_REGISTRY_PULL=0 "${ROOT_DIR}/scripts/smoke-test.sh"
+    # IMAGE_OVERRIDE, rather than relying on the tag in k8s/deployment.yaml
+    # happening to match: that tag names a previously published image, so
+    # without this a run that forgot to side-load would quietly pull the old
+    # one from the registry and report a pass for code it never executed.
+    IMAGE_OVERRIDE="${ref}" ASSERT_REGISTRY_PULL=0 "${ROOT_DIR}/scripts/smoke-test.sh"
     "${ROOT_DIR}/scripts/verify-zdd.sh"
 
     summary "- Kubernetes end-to-end passed on \`linux/$(ci_arch)\`"

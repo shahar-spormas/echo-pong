@@ -16,6 +16,11 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The commit every job builds and labels its image with. On a pull request
+  # this is the merge commit, which is also what actions/checkout checks out.
+  CI_COMMIT_SHA: ${{ github.sha }}
+
 jobs:
   static-checks:
     name: Static checks

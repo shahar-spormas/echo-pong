@@ -30,3 +30,7 @@ ACTIONLINT_SHA256_amd64="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc38
 ACTIONLINT_SHA256_arm64="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
 
 CLUSTER_NAME="echo-pong-k8s"
+
+# Where the app is published. Lowercase, because a registry path has to be.
+REGISTRY="ghcr.io"
+IMAGE_NAME="ghcr.io/shahar-spormas/echo-pong"

@@ -32,6 +32,12 @@ PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.11.1}"
 ASSERT_REGISTRY_PULL="${ASSERT_REGISTRY_PULL:-0}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/}"
 
+# Set IMAGE_OVERRIDE to test an image other than the one k8s/deployment.yaml
+# names. CI builds a uniquely tagged image per commit and points this at it,
+# because the tag in the manifest belongs to an already published release: left
+# alone, a run that failed to side-load would pull that older image and pass.
+IMAGE_OVERRIDE="${IMAGE_OVERRIDE:-}"
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -41,8 +47,13 @@ fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 info() { echo "        $*"; }
 
+MANIFEST_DIR="$ROOT_DIR/k8s"
+RENDERED_DIR=""
+
 cleanup() {
   kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  [[ -n "$RENDERED_DIR" ]] && rm -rf "$RENDERED_DIR"
+  return 0
 }
 trap cleanup EXIT
 
@@ -106,7 +117,20 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-file=token="$SECRET_FILE" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-kubectl -n "$NAMESPACE" apply -f "$ROOT_DIR/k8s/" >/dev/null
+# Rendered into a temp directory rather than patched after applying, so there
+# is one rollout to wait on instead of two, the second racing the first.
+if [[ -n "$IMAGE_OVERRIDE" ]]; then
+  RENDERED_DIR="$(mktemp -d)"
+  cp "$ROOT_DIR"/k8s/*.yaml "$RENDERED_DIR/"
+  sed -E "s|^([[:space:]]+image:[[:space:]]+).*$|\1${IMAGE_OVERRIDE}|" \
+    "$ROOT_DIR/k8s/deployment.yaml" > "$RENDERED_DIR/deployment.yaml"
+  grep -q "image: ${IMAGE_OVERRIDE}$" "$RENDERED_DIR/deployment.yaml" \
+    || { echo "could not substitute the image into deployment.yaml" >&2; exit 1; }
+  MANIFEST_DIR="$RENDERED_DIR"
+  info "testing $IMAGE_OVERRIDE in place of the image in k8s/deployment.yaml"
+fi
+
+kubectl -n "$NAMESPACE" apply -f "$MANIFEST_DIR/" >/dev/null
 kubectl -n "$NAMESPACE" rollout status "deploy/$DEPLOYMENT" --timeout=300s >/dev/null
 info "deployment rolled out"
 
