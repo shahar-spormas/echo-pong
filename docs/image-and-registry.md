@@ -208,12 +208,25 @@ runner. They were decorative anyway, since nothing verifies them at admission.
 
 Two kinds to deploy:
 
-| Trigger | Tag | Means |
+| Trigger | Publishes | Means |
 |---|---|---|
-| push to `main` | `v<VERSION>-<7-char commit>` | a snapshot of that commit |
-| push of `v1.2.3` | `v1.2.3` | a release |
+| pull request | nothing | gated, never in the registry |
+| push to `main` | nothing | built, scanned and cluster-tested only |
+| push of `v1.2.3` | `v1.2.3` and `v1.2.3-<7-char commit>` | a release, under two names |
 
-Either one is a multi-architecture index, so a client gets the platform it asked
+Only a tag publishes. The first version of this published from `main` as well,
+which meant a release was built, scanned, tested and pushed twice for the same
+commit: once as a snapshot when the version bump landed, then again minutes
+later under the tag. Nothing about the second run could disagree with the first,
+so it was work and registry space spent to learn nothing. Tags are the only
+thing anyone deploys, so tags are the only thing published, and `main` keeps
+`packages: write` nowhere near it.
+
+Both names come out of one `imagetools create`, so they are the same index and
+cannot drift. `v1.2.3` is what a human types; `v1.2.3-<commit>` is what an
+incident is traced with, without having to read a label to find out what shipped.
+
+Either is a multi-architecture index, so a client gets the platform it asked
 for and `k8s/deployment.yaml` names no architecture.
 
 No `latest`. It is the one tag that cannot say what it contains, it silently

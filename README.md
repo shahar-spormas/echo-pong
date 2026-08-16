@@ -123,21 +123,23 @@ static-checks
      |            |
    scan          e2e          in parallel, both from that tarball
      |            |
-      `-> publish <-'         only on a push to main
+      `-> publish <-'         only on a version tag
              |
       verify-published
+             |
+      GitHub Release          binaries and notes
 ```
 
-A pull request stops after `scan` and `e2e` and never holds registry
-credentials.
+Pull requests and pushes to `main` stop after `scan` and `e2e`, and never hold
+registry credentials.
 
 A few things worth knowing:
 
-- **Versions.** A push to `main` publishes a snapshot,
-  `ghcr.io/shahar-spormas/echo-pong:v<VERSION>-<7-char commit>`. Pushing a
-  `v1.2.3` tag runs the same gates, publishes `v1.2.3`, and attaches the Linux
-  `amd64` and `arm64` binaries to a GitHub Release. No `latest`, and no
-  published tag is ever moved. Cutting a release is two steps:
+- **Versions.** Only a tag publishes. A push to `main` builds, scans and
+  cluster-tests, and stops there. Pushing `v1.2.3` runs the same gates and then
+  publishes one image under two names, `v1.2.3` and `v1.2.3-<7-char commit>`,
+  plus the Linux `amd64` and `arm64` binaries on a GitHub Release. No `latest`,
+  and no published tag is ever moved. Cutting a release is two steps:
 
 ```bash
 # VERSION and the tag have to agree, or the run fails before it builds.
