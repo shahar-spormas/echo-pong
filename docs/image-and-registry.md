@@ -185,9 +185,9 @@ is closed by it. The shape:
 - The scan and the cluster test are sibling jobs rather than consecutive steps,
   so a scan failure does not hide the rollout result, and each installs only the
   tools it needs.
-- Publishing happens only on a push to `main`, and only after both the scan and
-  the cluster test have passed on both architectures. Pull requests are never
-  given registry credentials, so a fork cannot reach the registry at all.
+- Publishing happens only on a version tag, and only after the scan and the
+  cluster test have passed on both architectures. Pull requests are never given
+  registry credentials, so a fork cannot reach the registry at all.
 - Tags are `v<VERSION>-<7-char commit>`, from the `VERSION` file plus the
   commit. No `latest`, no branch tags. The full commit is in the image's
   `org.opencontainers.image.revision` label.
@@ -211,7 +211,7 @@ Two kinds to deploy:
 | Trigger | Publishes | Means |
 |---|---|---|
 | pull request | nothing | gated, never in the registry |
-| push to `main` | nothing | built, scanned and cluster-tested only |
+| push to `main` | nothing | no run at all; the merged tree is what the pull request tested |
 | push of `v1.2.3` | `v1.2.3` and `v1.2.3-<7-char commit>` | a release, under two names |
 
 Only a tag publishes. The first version of this published from `main` as well,
