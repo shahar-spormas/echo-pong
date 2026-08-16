@@ -634,8 +634,15 @@ do_publish_image() {
         arch_refs+=("${ref}-${arch}")
     done
 
-    _info "assembling the multi-architecture manifest for ${ref}"
-    docker buildx imagetools create --tag "${ref}" "${arch_refs[@]}"
+    # One index, two names: the version people pull, and the same thing with the
+    # commit spelled out. Built in a single call so they cannot drift apart.
+    local names=() name
+    for name in $(_ci_publish_tags); do
+        names+=(--tag "${CI_IMAGE_NAME}:${name}")
+    done
+
+    _info "assembling the multi-architecture manifest: $(_ci_publish_tags | tr '\n' ' ')"
+    docker buildx imagetools create "${names[@]}" "${arch_refs[@]}"
 
     _publish_report "${ref}" "$(_ci_commit_sha)"
 
@@ -643,11 +650,23 @@ do_publish_image() {
     _stage_end
 }
 
+# What a release is published under. The bare version is what a human types;
+# the one carrying the commit is what an incident is traced with.
+_ci_publish_tags() {
+    _ci_image_version
+    if [ -n "${CI_RELEASE_TAG:-}" ]; then
+        echo "$(_ci_image_version)-$(_ci_short_sha)"
+    fi
+}
+
 _publish_report() {
-    local ref="$1" revision="$2"
+    local ref="$1" revision="$2" name rows=()
+    for name in $(_ci_publish_tags); do
+        rows+=("row=PASS|Tag|\`${CI_IMAGE_NAME}:${name}\`")
+    done
     report table name=publish.md title=Publish \
         "headers=|Item|Value" \
-        "row=PASS|Tag|\`${ref}\`" \
+        "${rows[@]}" \
         "row=PASS|Index digest|\`$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}')\`" \
         "row=PASS|Revision|\`${revision}\`" \
         "row=PASS|Platforms|$(_platform_list)"
