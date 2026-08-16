@@ -130,13 +130,13 @@ static-checks
       GitHub Release          binaries and notes
 ```
 
-Pull requests and pushes to `main` stop after `scan` and `e2e`, and never hold
-registry credentials.
+A pull request stops after `scan` and `e2e` and never holds registry
+credentials. Pushes to `main` run nothing: a squash merge lands the tree the
+pull request already tested.
 
 A few things worth knowing:
 
-- **Versions.** Only a tag publishes. A push to `main` builds, scans and
-  cluster-tests, and stops there. Pushing `v1.2.3` runs the same gates and then
+- **Versions.** Only a tag builds and publishes. Pushing `v1.2.3` runs the gates and then
   publishes one image under two names, `v1.2.3` and `v1.2.3-<7-char commit>`,
   plus the Linux `amd64` and `arm64` binaries on a GitHub Release. No `latest`,
   and no published tag is ever moved. Cutting a release is two steps:

@@ -1,18 +1,14 @@
 name: CI
 
 # Orchestration only; the steps are in .ci/ci_jobs.sh, so they can be run and
-# linted without pushing a commit.
-#
-# Actions use release tags, not commit SHAs: a readability trade, since these
-# are all first-party actions/* and the tools that decide what gets tested and
-# shipped are pinned in .ci/consts.sh.
+# linted without pushing a commit. Actions are pinned by tag, the tools that
+# decide what ships are pinned in .ci/consts.sh.
 
+# No main: a squash merge lands the tree the PR already tested. Keeping main
+# green then relies on branch protection requiring branches to be up to date.
 on:
   pull_request:
   push:
-    branches: [main]
-    # A release runs the whole pipeline again rather than re-tagging what main
-    # published: the same gates, then the tag itself as the image version.
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
@@ -49,7 +45,7 @@ jobs:
         id: matrix
         run: echo "value=$(./.ci/ci_jobs.sh do_print_matrix)" >> "$GITHUB_OUTPUT"
 
-      # PRs lint their diff; a push to main leaves this unset and sweeps all.
+      # A pull request lints its diff. Unset elsewhere, which sweeps everything.
       - name: Static checks
         env:
           CI_LINT_BASE: ${{ github.event.pull_request.base.sha }}
@@ -183,9 +179,9 @@ jobs:
     # Both gates, both architectures: this is what keeps an unapproved
     # HIGH or CRITICAL finding out of the registry.
     needs: [scan, e2e]
-    # Tags only. Publishing from main as well meant every release was built,
-    # scanned, tested and pushed twice for the same commit, once as a snapshot
-    # and again under the tag. github.repository stops a fork publishing here.
+    # Publishing from main as well meant every release was built, scanned,
+    # tested and pushed twice for one commit. github.repository stops a fork
+    # publishing here.
     if: >-
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v') &&
